@@ -5,9 +5,17 @@ from dateutil import parser
 import plotly.express as px
 import uuid
 import time
+import json
+
+# --- 尝试导入云数据库连接库 (容错处理) ---
+try:
+    from streamlit_gsheets import GSheetsConnection
+    HAS_GSHEETS = True
+except ImportError:
+    HAS_GSHEETS = False
 
 # --- 页面配置 ---
-st.set_page_config(page_title="世纪名城智慧收费系统 V9.8", layout="wide", page_icon="🏢")
+st.set_page_config(page_title="世纪名城智慧收费系统 V10.0", layout="wide", page_icon="🏢")
 
 # --- 0. 数据库初始化 ---
 if 'ledger' not in st.session_state:
@@ -291,7 +299,7 @@ def check_login():
     if not st.session_state.logged_in:
         c1, c2, c3 = st.columns([1,2,1])
         with c2:
-            st.markdown("## 🔐 世纪名城 V9.8")
+            st.markdown("## 🔐 世纪名城 V10.0")
             user = st.text_input("账号")
             pwd = st.text_input("密码", type="password")
             if st.button("登录", use_container_width=True):
@@ -317,10 +325,42 @@ def main():
     with st.sidebar:
         st.title("🏢 世纪名城")
         st.info(f"👤 {user} | {role}")
+        
+        # --- V10.0 新增: 云端同步模块 ---
+        with st.expander("☁️ 云端数据同步 (Option A)", expanded=False):
+            if HAS_GSHEETS:
+                # 注意：此处需要配置 .streamlit/secrets.toml
+                # [connections.gsheets]
+                # spreadsheet = "你的谷歌表格链接"
+                try:
+                    conn = st.connection("gsheets", type=GSheetsConnection)
+                    
+                    if st.button("📥 从云端加载数据"):
+                        with st.spinner("正在拉取数据..."):
+                            df_cloud = conn.read(worksheet="ledger", usecols=list(range(15))) # 假设列
+                            # 实际使用建议序列化为JSON存储在单元格或分Sheet存储
+                            # 这里为简化演示，提示用户
+                            st.warning("请先配置 secrets.toml 连接到您的 Google Sheet")
+                            # 真实逻辑示例:
+                            # st.session_state.ledger = conn.read(worksheet="ledger")
+                            # st.session_state.rooms_db = conn.read(worksheet="rooms")
+                            # st.rerun()
+                            
+                    if st.button("💾 保存当前数据到云端"):
+                        with st.spinner("正在上传..."):
+                            # conn.update(worksheet="ledger", data=st.session_state.ledger)
+                            st.warning("请配置 secrets.toml")
+                except Exception as e:
+                    st.error(f"连接失败: {e}")
+            else:
+                st.caption("⚠️ 未检测到 `streamlit-gsheets` 库，仅支持本地内存模式。")
+                st.caption("部署时请在 requirements.txt 添加库。")
+
+        st.divider()
         menu = st.radio("导航", ["📊 财务驾驶舱", "📝 物业费录入", "🅿️ 车位管理(独立)", "📨 减免与审批", "🔍 综合查询", "📥 数据导入", "🛡️ 审计日志", "⚙️ 基础配置"])
         if st.button("退出"): logout()
 
-    # === 财务驾驶舱 (V9.8 修正：余额计算包含减免) ===
+    # === 财务驾驶舱 ===
     if menu == "📊 财务驾驶舱":
         st.title("📈 财务经营数据驾驶舱")
         
@@ -337,11 +377,10 @@ def main():
         if df_all.empty:
             st.warning("暂无数据")
         else:
-            # 数据清洗，防止非数字类型导致计算错误
+            # 清洗
             for col in ['应收', '实收', '减免金额']:
                 df_all[col] = pd.to_numeric(df_all[col], errors='coerce').fillna(0)
 
-            # V9.8 核心修正：余额 = 应收 - 实收 - 减免
             df_all['余额'] = df_all['应收'] - df_all['实收'] - df_all['减免金额']
             
             agg_df = df_all.groupby(['房号', '业主']).agg({
@@ -356,11 +395,11 @@ def main():
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("总应收", f"¥{total_ys:,.0f}")
             k2.metric("总实收", f"¥{total_ss:,.0f}")
-            k3.metric("❌ 净欠费总额", f"¥{real_arrears:,.0f}", delta="需催缴", delta_color="inverse")
-            k4.metric("✅ 净预收总额", f"¥{total_pre:,.0f}", delta="资金沉淀")
+            k3.metric("❌ 净欠费", f"¥{real_arrears:,.0f}", delta="需催缴", delta_color="inverse")
+            k4.metric("✅ 净预收", f"¥{total_pre:,.0f}", delta="资金沉淀")
             
             st.markdown("---")
-            t1, t2 = st.tabs(["🔴 欠费户明细 (扣除减免后)", "🟢 溢缴/预收户明细"])
+            t1, t2 = st.tabs(["🔴 欠费户明细", "🟢 溢缴/预收户明细"])
             with t1:
                 owe_df = agg_df[agg_df['余额'] > 0.1].sort_values('余额', ascending=False)
                 if not owe_df.empty: st.dataframe(owe_df.rename(columns={'余额':'欠费金额'}), use_container_width=True)
@@ -372,62 +411,7 @@ def main():
                     st.dataframe(pre_df[['房号','业主','应收','实收','溢缴金额']], use_container_width=True)
                 else: st.info("无预收")
 
-    # === 减免审批 (V9.8 修正：新增驳回功能) ===
-    elif menu == "📨 减免与审批":
-        st.title("减免审批")
-        t1, t2 = st.tabs(["申请", "审批"])
-        with t1:
-            c1, c2 = st.columns(2)
-            sel = c1.selectbox("房号", st.session_state.rooms_db['房号'].unique() if not st.session_state.rooms_db.empty else [])
-            with st.form("w"):
-                amt = st.number_input("减免金额")
-                rsn = st.text_area("原因")
-                if st.form_submit_button("提交"):
-                    req = {'申请单号':str(uuid.uuid4())[:6], '房号':sel, '申请减免金额':amt, '申请原因':rsn, '审批状态':'待审批', '申请人':user, '申请时间':str(datetime.date.today()), '费用类型':'物业服务费', '原应收':0, '拟实收':0}
-                    st.session_state.waiver_requests = pd.concat([st.session_state.waiver_requests, pd.DataFrame([req])], ignore_index=True)
-                    log_action(user, "发起减免", f"房号{sel} 减免{amt}")
-                    st.success("提交成功")
-                    st.rerun()
-        with t2:
-            if role in ["管理员","审核员"]:
-                p = st.session_state.waiver_requests[st.session_state.waiver_requests['审批状态']=='待审批']
-                if not p.empty:
-                    for i, r in p.iterrows():
-                        with st.expander(f"{r['房号']} 申请减免 ¥{r['申请减免金额']} (原因: {r['申请原因']})", expanded=True):
-                            c_ok, c_no = st.columns([1, 2])
-                            
-                            # 通过按钮
-                            if c_ok.button("✅ 通过", key=f"p{i}"):
-                                st.session_state.waiver_requests.at[i,'审批状态']='已通过'
-                                st.session_state.waiver_requests.at[i,'审批人']=user
-                                new_rec = {
-                                    "流水号": str(uuid.uuid4())[:8], "房号": r['房号'], "业主": "详见档案",
-                                    "费用类型": "减免抵扣", "应收": 0, "实收": 0, "减免金额": r['申请减免金额'], 
-                                    "欠费": 0, "收费区间": "减免", "状态": "减免结清", 
-                                    "收费日期": str(datetime.date.today()), "备注": f"审批通过: {r['申请单号']}", "操作人": user
-                                }
-                                st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame([new_rec])], ignore_index=True)
-                                log_action(user, "审批通过", f"单号{r['申请单号']}")
-                                st.rerun()
-                            
-                            # 驳回区域
-                            with c_no:
-                                with st.form(key=f"rej_form_{i}"):
-                                    rej_reason = st.text_input("驳回理由", key=f"rr_{i}")
-                                    if st.form_submit_button("🚫 驳回"):
-                                        if not rej_reason:
-                                            st.error("请填写理由")
-                                        else:
-                                            st.session_state.waiver_requests.at[i,'审批状态']='已驳回'
-                                            st.session_state.waiver_requests.at[i,'审批意见']=rej_reason
-                                            st.session_state.waiver_requests.at[i,'审批人']=user
-                                            log_action(user, "审批驳回", f"单号{r['申请单号']} 理由:{rej_reason}")
-                                            st.warning("已驳回")
-                                            st.rerun()
-                else: st.info("无待办")
-            else: st.error("无权")
-
-    # === 其他模块 (保持 V9.7) ===
+    # === 物业费录入 ===
     elif menu == "📝 物业费录入":
         st.title("前台物业收费")
         rooms = st.session_state.rooms_db['房号'].unique()
@@ -462,6 +446,7 @@ def main():
                     time.sleep(1)
                     st.rerun()
 
+    # === 车位管理 ===
     elif menu == "🅿️ 车位管理(独立)":
         st.title("🅿️ 车位管理")
         t1, t2 = st.tabs(["录入", "台账"])
@@ -490,6 +475,7 @@ def main():
         with t2:
             st.dataframe(st.session_state.parking_ledger)
 
+    # === 综合查询 ===
     elif menu == "🔍 综合查询":
         st.title("🔍 业主全景查询")
         q = st.text_input("输入房号 / 业主 / 收据号")
@@ -499,7 +485,7 @@ def main():
             res = df[df['房号'].astype(str).str.contains(q, na=False) | df['业主'].astype(str).str.contains(q, na=False) | df['收据编号'].astype(str).str.contains(q, na=False)]
             st.dataframe(res, use_container_width=True)
             
-            st.markdown("### 📸 欠费/结清快照 (按户合并)")
+            st.markdown("### 📸 欠费/结清快照")
             if not res.empty:
                 snap = res.groupby(['房号','业主','费用类型']).agg({
                     '应收':'sum', '实收':'sum', '减免金额':'sum'
@@ -511,6 +497,7 @@ def main():
                     return [''] * len(row)
                 st.dataframe(snap.style.apply(style_snap, axis=1).format("{:.2f}", subset=['应收','实收','余额']), use_container_width=True)
 
+    # === 数据导入 ===
     elif menu == "📥 数据导入":
         st.title("数据导入")
         t1, t2 = st.tabs(["2025台账/车位", "2024历史欠费"])
@@ -539,6 +526,47 @@ def main():
                         st.success(f"导入 {len(r3)} 条")
                         time.sleep(1)
                         st.rerun()
+
+    # === 减免审批 ===
+    elif menu == "📨 减免与审批":
+        st.title("减免审批")
+        t1, t2 = st.tabs(["申请", "审批"])
+        with t1:
+            c1, c2 = st.columns(2)
+            sel = c1.selectbox("房号", st.session_state.rooms_db['房号'].unique() if not st.session_state.rooms_db.empty else [])
+            with st.form("w"):
+                amt = st.number_input("减免金额")
+                rsn = st.text_area("原因")
+                if st.form_submit_button("提交"):
+                    req = {'申请单号':str(uuid.uuid4())[:6], '房号':sel, '申请减免金额':amt, '申请原因':rsn, '审批状态':'待审批', '申请人':user, '申请时间':str(datetime.date.today()), '费用类型':'物业服务费', '原应收':0, '拟实收':0}
+                    st.session_state.waiver_requests = pd.concat([st.session_state.waiver_requests, pd.DataFrame([req])], ignore_index=True)
+                    log_action(user, "发起减免", f"房号{sel} 减免{amt}")
+                    st.success("提交成功")
+                    st.rerun()
+        with t2:
+            if role in ["管理员","审核员"]:
+                p = st.session_state.waiver_requests[st.session_state.waiver_requests['审批状态']=='待审批']
+                if not p.empty:
+                    for i, r in p.iterrows():
+                        with st.expander(f"申请: {r['房号']} - 减免 {r['申请减免金额']}"):
+                            c1, c2 = st.columns(2)
+                            if c1.button("通过", key=f"p_{i}"):
+                                st.session_state.waiver_requests.at[i,'审批状态']='已通过'
+                                new_rec = {
+                                    "流水号": str(uuid.uuid4())[:8], "房号": r['房号'], "业主": "详见档案",
+                                    "费用类型": "减免抵扣", "应收": 0, "实收": 0, "减免金额": r['申请减免金额'], 
+                                    "欠费": 0, "收费区间": "减免", "状态": "减免结清", 
+                                    "收费日期": str(datetime.date.today()), "备注": "审批通过", "操作人": user, "收据编号": ""
+                                }
+                                st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame([new_rec])], ignore_index=True)
+                                log_action(user, "审批通过", f"单号{r['申请单号']}")
+                                st.rerun()
+                            if c2.button("驳回", key=f"r_{i}"):
+                                st.session_state.waiver_requests.at[i,'审批状态']='已驳回'
+                                log_action(user, "审批驳回", f"单号{r['申请单号']}")
+                                st.rerun()
+                else: st.info("无待办")
+            else: st.error("无权")
 
     elif menu == "🛡️ 审计日志":
         if role=="管理员": st.dataframe(st.session_state.audit_logs)

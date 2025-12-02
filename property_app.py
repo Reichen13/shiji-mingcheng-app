@@ -14,7 +14,7 @@ except ImportError:
     HAS_GSHEETS = False
 
 # --- 页面配置 ---
-st.set_page_config(page_title="世纪名城智慧收费系统 V10.2", layout="wide", page_icon="🏢")
+st.set_page_config(page_title="世纪名城智慧收费系统 V10.4", layout="wide", page_icon="🏢")
 
 # --- 0. 数据库初始化 ---
 def init_df(key, columns):
@@ -33,10 +33,8 @@ if 'parking_types' not in st.session_state:
 # --- 1. 核心工具函数 ---
 
 def safe_concat(df_list):
-    """安全合并函数，消除 FutureWarning"""
     non_empty = [d for d in df_list if not d.empty]
-    if not non_empty:
-        return df_list[0] if df_list else pd.DataFrame()
+    if not non_empty: return pd.DataFrame()
     return pd.concat(non_empty, ignore_index=True)
 
 def log_action(user, action, detail):
@@ -275,10 +273,10 @@ def check_login():
     if not st.session_state.logged_in:
         c1, c2, c3 = st.columns([1,2,1])
         with c2:
-            st.markdown("## 🔐 世纪名城 V10.2")
+            st.markdown("## 🔐 世纪名城 V10.4")
             user = st.text_input("账号")
             pwd = st.text_input("密码", type="password")
-            if st.button("登录", use_container_width=True):
+            if st.button("登录", width='stretch'): # 修复 UI warning
                 if user in USERS and USERS[user]["pass"] == pwd:
                     st.session_state.logged_in = True
                     st.session_state.username = user
@@ -302,9 +300,21 @@ def main():
         st.title("🏢 世纪名城")
         st.info(f"👤 {user} | {role}")
         
-        # --- V10.2: 增强版云端同步 ---
+        # --- 云端数据同步 (配置医生版) ---
         with st.expander("☁️ 云端数据同步", expanded=True):
             if HAS_GSHEETS:
+                # 诊断区域
+                try:
+                    secrets_status = "❌ 未配置"
+                    if "connections" in st.secrets and "gsheets" in st.secrets.connections:
+                        conf = st.secrets.connections.gsheets
+                        if "private_key" in conf:
+                            secrets_status = "✅ 已配置 (服务账号)"
+                        elif "spreadsheet" in conf:
+                            secrets_status = "⚠️ 仅配置了链接 (无法写入)"
+                    st.caption(f"配置状态: {secrets_status}")
+                except: pass
+
                 try:
                     conn = st.connection("gsheets", type=GSheetsConnection)
                     
@@ -312,29 +322,21 @@ def main():
                         if st.session_state.ledger.empty and st.session_state.parking_ledger.empty:
                             st.warning("暂无数据可保存")
                         else:
-                            with st.spinner("正在消毒并上传数据..."):
+                            with st.spinner("正在数据消毒并上传..."):
                                 try:
-                                    # 1. 消毒: 填充NaN为空字符串, 强制转为str
-                                    df_ledger_safe = st.session_state.ledger.fillna("").astype(str)
-                                    df_parking_safe = st.session_state.parking_ledger.fillna("").astype(str)
-                                    df_rooms_safe = st.session_state.rooms_db.fillna("").astype(str)
-                                    
-                                    # 2. 写入: 分别写入不同的 Worksheet (需要提前在Google Sheet建好，或者全存在一个大表里)
-                                    # 为了简单稳定，我们只演示保存主台账 ledger。
-                                    # 若要保存多个，建议使用 conn.update(worksheet="Sheet1", data=...)
-                                    
-                                    conn.update(worksheet="ledger", data=df_ledger_safe)
-                                    # conn.update(worksheet="parking", data=df_parking_safe) # 可选扩展
-                                    
-                                    st.success("✅ 保存成功！(主台账已同步)")
+                                    # V10.4 关键修复: 数据清洗，填充空值，强制转字符串
+                                    df_save = st.session_state.ledger.fillna("").astype(str)
+                                    conn.update(worksheet="ledger", data=df_save)
+                                    st.success("✅ 保存成功！")
                                 except Exception as e:
                                     st.error(f"保存失败: {str(e)}")
-                                    st.info("提示: 请检查 Google Sheet 是否有 'ledger' 工作表，且权限为 Editor")
+                                    if "403" in str(e) or "PERMISSION_DENIED" in str(e):
+                                        st.error("权限拒绝！请检查：1.Secrets是否填入了JSON内容(private_key) 2.表格是否给机器人开了Editor权限")
 
                     if st.button("📥 从云端恢复数据"):
                         with st.spinner("正在拉取..."):
                             try:
-                                df_cloud = conn.read(worksheet="ledger", ttl=0) # ttl=0 禁用缓存
+                                df_cloud = conn.read(worksheet="ledger", ttl=0)
                                 df_cloud = df_cloud.dropna(how='all')
                                 st.session_state.ledger = df_cloud
                                 st.success("✅ 恢复成功！")
@@ -343,7 +345,7 @@ def main():
                             except Exception as e:
                                 st.error(f"读取失败: {str(e)}")
                 except Exception as e:
-                    st.error(f"连接组件初始化失败: {e}")
+                    st.error(f"连接组件错误: {e}")
             else:
                 st.error("⚠️ 缺少 st-gsheets-connection 库")
 
@@ -392,13 +394,13 @@ def main():
             t1, t2 = st.tabs(["🔴 欠费户明细", "🟢 溢缴/预收户明细"])
             with t1:
                 owe_df = agg_df[agg_df['余额'] > 0.1].sort_values('余额', ascending=False)
-                if not owe_df.empty: st.dataframe(owe_df.rename(columns={'余额':'欠费金额'}), use_container_width=True)
+                if not owe_df.empty: st.dataframe(owe_df.rename(columns={'余额':'欠费金额'}), width='stretch')
                 else: st.success("无欠费")
             with t2:
                 pre_df = agg_df[agg_df['余额'] < -0.1].sort_values('余额', ascending=True)
                 if not pre_df.empty:
                     pre_df['溢缴金额'] = pre_df['余额'] * -1
-                    st.dataframe(pre_df[['房号','业主','应收','实收','溢缴金额']], use_container_width=True)
+                    st.dataframe(pre_df[['房号','业主','应收','实收','溢缴金额']], width='stretch')
                 else: st.info("无预收")
 
     # === 物业费录入 ===
@@ -463,7 +465,7 @@ def main():
                     time.sleep(1)
                     st.rerun()
         with t2:
-            st.dataframe(st.session_state.parking_ledger)
+            st.dataframe(st.session_state.parking_ledger, width='stretch')
 
     # === 综合查询 ===
     elif menu == "🔍 综合查询":
@@ -473,9 +475,9 @@ def main():
             st.markdown("### 📜 交易流水")
             df = st.session_state.ledger
             res = df[df['房号'].astype(str).str.contains(q, na=False) | df['业主'].astype(str).str.contains(q, na=False) | df['收据编号'].astype(str).str.contains(q, na=False)]
-            st.dataframe(res, use_container_width=True)
+            st.dataframe(res, width='stretch')
             
-            st.markdown("### 📸 欠费/结清快照 (按户合并)")
+            st.markdown("### 📸 欠费/结清快照")
             if not res.empty:
                 snap = res.groupby(['房号','业主','费用类型']).agg({
                     '应收':'sum', '实收':'sum', '减免金额':'sum'
@@ -485,7 +487,7 @@ def main():
                     if row['余额'] > 0.1: return ['background-color: #ffcccc'] * len(row)
                     if row['余额'] < -0.1: return ['background-color: #ccffcc'] * len(row)
                     return [''] * len(row)
-                st.dataframe(snap.style.apply(style_snap, axis=1).format("{:.2f}", subset=['应收','实收','余额']), use_container_width=True)
+                st.dataframe(snap.style.apply(style_snap, axis=1).format("{:.2f}", subset=['应收','实收','余额']), width='stretch')
 
     # === 数据导入 ===
     elif menu == "📥 数据导入":
@@ -561,10 +563,10 @@ def main():
             else: st.error("无权")
 
     elif menu == "🛡️ 审计日志":
-        if role=="管理员": st.dataframe(st.session_state.audit_logs)
+        if role=="管理员": st.dataframe(st.session_state.audit_logs, width='stretch')
         else: st.error("无权")
     elif menu == "⚙️ 基础配置":
-        st.data_editor(st.session_state.rooms_db)
+        st.data_editor(st.session_state.rooms_db, width='stretch')
 
 if __name__ == "__main__":
     main()

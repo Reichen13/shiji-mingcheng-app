@@ -5,9 +5,8 @@ from dateutil import parser
 import plotly.express as px
 import uuid
 import time
-import json
 
-# --- 尝试导入云数据库连接库 (容错处理) ---
+# --- 尝试导入云数据库连接库 ---
 try:
     from streamlit_gsheets import GSheetsConnection
     HAS_GSHEETS = True
@@ -15,7 +14,7 @@ except ImportError:
     HAS_GSHEETS = False
 
 # --- 页面配置 ---
-st.set_page_config(page_title="世纪名城智慧收费系统 V10.0", layout="wide", page_icon="🏢")
+st.set_page_config(page_title="世纪名城智慧收费系统 V10.1", layout="wide", page_icon="🏢")
 
 # --- 0. 数据库初始化 ---
 if 'ledger' not in st.session_state:
@@ -56,9 +55,12 @@ def log_action(user, action, detail):
         "时间": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "操作人": str(user), "动作": str(action), "详情": str(detail)
     }
-    if not isinstance(st.session_state.audit_logs, pd.DataFrame):
-        st.session_state.audit_logs = pd.DataFrame(columns=['时间', '操作人', '动作', '详情'])
-    st.session_state.audit_logs = pd.concat([st.session_state.audit_logs, pd.DataFrame([new_log])], ignore_index=True)
+    # 修复 concat warning
+    new_df = pd.DataFrame([new_log])
+    if st.session_state.audit_logs.empty:
+        st.session_state.audit_logs = new_df
+    else:
+        st.session_state.audit_logs = pd.concat([st.session_state.audit_logs, new_df], ignore_index=True)
 
 def parse_date(date_val):
     if pd.isna(date_val) or str(date_val).strip() == "" or str(date_val).strip() == "nan": return ""
@@ -299,7 +301,7 @@ def check_login():
     if not st.session_state.logged_in:
         c1, c2, c3 = st.columns([1,2,1])
         with c2:
-            st.markdown("## 🔐 世纪名城 V10.0")
+            st.markdown("## 🔐 世纪名城 V10.1")
             user = st.text_input("账号")
             pwd = st.text_input("密码", type="password")
             if st.button("登录", use_container_width=True):
@@ -326,34 +328,31 @@ def main():
         st.title("🏢 世纪名城")
         st.info(f"👤 {user} | {role}")
         
-      # --- V10.1 激活: 云端数据同步 (功能实装版) ---
+        # --- 云端数据同步 ---
         with st.expander("☁️ 云端数据同步 (Google Sheets)", expanded=False):
             if HAS_GSHEETS:
                 try:
-                    # 创建连接
                     conn = st.connection("gsheets", type=GSheetsConnection)
                     
-                    # 1. 保存按钮
                     if st.button("💾 保存当前数据到云端"):
-                        with st.spinner("正在连接 Google Sheets..."):
-                            try:
-                                # 写入数据到名为 'ledger' 的工作表
-                                # 如果您的表格里没有这个sheet，插件会自动创建或使用默认
-                                conn.update(worksheet="ledger", data=st.session_state.ledger)
-                                st.success("✅ 保存成功！数据已同步到 Google Sheet")
-                            except Exception as e:
-                                st.error(f"保存失败: {e}")
-                                st.caption("请检查：1.Secrets配置是否正确 2.Google Sheet是否开启了'任何人可编辑'权限")
+                        if st.session_state.ledger.empty:
+                            st.warning("暂无数据可保存")
+                        else:
+                            with st.spinner("正在连接 Google Sheets..."):
+                                try:
+                                    # 数据清洗：转为字符串防止日期格式报错
+                                    df_save = st.session_state.ledger.astype(str)
+                                    conn.update(worksheet="ledger", data=df_save)
+                                    st.success("✅ 保存成功！")
+                                except Exception as e:
+                                    st.error(f"保存失败: {str(e)}")
+                                    st.caption("请检查 Secrets 配置或表格权限")
 
-                    # 2. 加载按钮
                     if st.button("📥 从云端恢复数据"):
                         with st.spinner("正在拉取数据..."):
                             try:
-                                # 从 'ledger' 工作表读取
                                 df_cloud = conn.read(worksheet="ledger")
-                                # 简单的清洗，防止空行
                                 df_cloud = df_cloud.dropna(how='all')
-                                # 更新到内存
                                 st.session_state.ledger = df_cloud
                                 st.success("✅ 恢复成功！")
                                 time.sleep(1)
@@ -363,7 +362,7 @@ def main():
                 except Exception as e:
                     st.error(f"连接初始化失败: {e}")
             else:
-                st.error("⚠️ 未检测到云端组件，请检查 requirements.txt")
+                st.error("⚠️ 未检测到 st-gsheets-connection 库")
 
         st.divider()
         menu = st.radio("导航", ["📊 财务驾驶舱", "📝 物业费录入", "🅿️ 车位管理(独立)", "📨 减免与审批", "🔍 综合查询", "📥 数据导入", "🛡️ 审计日志", "⚙️ 基础配置"])
@@ -386,7 +385,6 @@ def main():
         if df_all.empty:
             st.warning("暂无数据")
         else:
-            # 清洗
             for col in ['应收', '实收', '减免金额']:
                 df_all[col] = pd.to_numeric(df_all[col], errors='coerce').fillna(0)
 
@@ -404,8 +402,8 @@ def main():
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("总应收", f"¥{total_ys:,.0f}")
             k2.metric("总实收", f"¥{total_ss:,.0f}")
-            k3.metric("❌ 净欠费", f"¥{real_arrears:,.0f}", delta="需催缴", delta_color="inverse")
-            k4.metric("✅ 净预收", f"¥{total_pre:,.0f}", delta="资金沉淀")
+            k3.metric("❌ 净欠费总额", f"¥{real_arrears:,.0f}", delta="需催缴", delta_color="inverse")
+            k4.metric("✅ 净预收总额", f"¥{total_pre:,.0f}", delta="资金沉淀")
             
             st.markdown("---")
             t1, t2 = st.tabs(["🔴 欠费户明细", "🟢 溢缴/预收户明细"])
@@ -449,7 +447,10 @@ def main():
                         "备注": "前台核销" if is_offset else "前台新增", 
                         "操作人": user, "来源文件": "手工"
                     }
-                    st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame([new_rec])], ignore_index=True)
+                    if st.session_state.ledger.empty:
+                        st.session_state.ledger = pd.DataFrame([new_rec])
+                    else:
+                        st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame([new_rec])], ignore_index=True)
                     log_action(user, "物业费录入", f"房号{sel_room} 实收{f_ss}")
                     st.success("录入成功！")
                     time.sleep(1)
@@ -476,7 +477,10 @@ def main():
                         "业主/车主": p_owner, "应收": p_ys, "实收": p_ss, "减免金额": p_waive, "欠费": p_ys-p_ss-p_waive,
                         "收据编号": p_rec, "收费日期": str(datetime.date.today()), "收费区间": p_period, "操作人": user
                     }
-                    st.session_state.parking_ledger = pd.concat([st.session_state.parking_ledger, pd.DataFrame([new_p])], ignore_index=True)
+                    if st.session_state.parking_ledger.empty:
+                        st.session_state.parking_ledger = pd.DataFrame([new_p])
+                    else:
+                        st.session_state.parking_ledger = pd.concat([st.session_state.parking_ledger, pd.DataFrame([new_p])], ignore_index=True)
                     log_action(user, "车位录入", f"车位{p_no} 实收{p_ss}")
                     st.success("成功")
                     time.sleep(1)
@@ -494,7 +498,7 @@ def main():
             res = df[df['房号'].astype(str).str.contains(q, na=False) | df['业主'].astype(str).str.contains(q, na=False) | df['收据编号'].astype(str).str.contains(q, na=False)]
             st.dataframe(res, use_container_width=True)
             
-            st.markdown("### 📸 欠费/结清快照")
+            st.markdown("### 📸 欠费/结清快照 (按户合并)")
             if not res.empty:
                 snap = res.groupby(['房号','业主','费用类型']).agg({
                     '应收':'sum', '实收':'sum', '减免金额':'sum'
@@ -517,8 +521,12 @@ def main():
                 if f1 or f2:
                     r1, r2 = process_2025_import(f1)
                     p = process_parking_import(f2)
-                    if r1: st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame(r1)], ignore_index=True)
-                    if p: st.session_state.parking_ledger = pd.concat([st.session_state.parking_ledger, pd.DataFrame(p)], ignore_index=True)
+                    if r1: 
+                        if st.session_state.ledger.empty: st.session_state.ledger = pd.DataFrame(r1)
+                        else: st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame(r1)], ignore_index=True)
+                    if p: 
+                        if st.session_state.parking_ledger.empty: st.session_state.parking_ledger = pd.DataFrame(p)
+                        else: st.session_state.parking_ledger = pd.concat([st.session_state.parking_ledger, pd.DataFrame(p)], ignore_index=True)
                     if r2: st.session_state.rooms_db = pd.DataFrame(r2).drop_duplicates(subset='房号', keep='last')
                     log_action(user, "批量导入", f"物业费{len(r1)}条, 车位{len(p)}条")
                     st.success(f"导入完成")
@@ -530,7 +538,8 @@ def main():
                 if f3:
                     r3 = process_2024_arrears(f3)
                     if r3:
-                        st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame(r3)], ignore_index=True)
+                        if st.session_state.ledger.empty: st.session_state.ledger = pd.DataFrame(r3)
+                        else: st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame(r3)], ignore_index=True)
                         log_action(user, "欠费导入", f"历史欠费{len(r3)}条")
                         st.success(f"导入 {len(r3)} 条")
                         time.sleep(1)
@@ -548,7 +557,8 @@ def main():
                 rsn = st.text_area("原因")
                 if st.form_submit_button("提交"):
                     req = {'申请单号':str(uuid.uuid4())[:6], '房号':sel, '申请减免金额':amt, '申请原因':rsn, '审批状态':'待审批', '申请人':user, '申请时间':str(datetime.date.today()), '费用类型':'物业服务费', '原应收':0, '拟实收':0}
-                    st.session_state.waiver_requests = pd.concat([st.session_state.waiver_requests, pd.DataFrame([req])], ignore_index=True)
+                    if st.session_state.waiver_requests.empty: st.session_state.waiver_requests = pd.DataFrame([req])
+                    else: st.session_state.waiver_requests = pd.concat([st.session_state.waiver_requests, pd.DataFrame([req])], ignore_index=True)
                     log_action(user, "发起减免", f"房号{sel} 减免{amt}")
                     st.success("提交成功")
                     st.rerun()
@@ -567,7 +577,8 @@ def main():
                                     "欠费": 0, "收费区间": "减免", "状态": "减免结清", 
                                     "收费日期": str(datetime.date.today()), "备注": "审批通过", "操作人": user, "收据编号": ""
                                 }
-                                st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame([new_rec])], ignore_index=True)
+                                if st.session_state.ledger.empty: st.session_state.ledger = pd.DataFrame([new_rec])
+                                else: st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame([new_rec])], ignore_index=True)
                                 log_action(user, "审批通过", f"单号{r['申请单号']}")
                                 st.rerun()
                             if c2.button("驳回", key=f"r_{i}"):
@@ -585,5 +596,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

@@ -3,4 +3,5 @@ pandas
 plotly
 python-dateutil
 openpyxl
-st-gsheets-connection
+paramiko
+

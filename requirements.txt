@@ -3,6 +3,4 @@ pandas
 plotly
 python-dateutil
 openpyxl
-streamlit-gsheets
 st-gsheets-connection
-

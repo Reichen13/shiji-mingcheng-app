@@ -326,35 +326,44 @@ def main():
         st.title("🏢 世纪名城")
         st.info(f"👤 {user} | {role}")
         
-        # --- V10.0 新增: 云端同步模块 ---
-        with st.expander("☁️ 云端数据同步 (Option A)", expanded=False):
+        # --- V10.1 激活: 云端数据同步 (功能实装版) ---
+        with st.expander("☁️ 云端数据同步 (Google Sheets)", expanded=False):
             if HAS_GSHEETS:
-                # 注意：此处需要配置 .streamlit/secrets.toml
-                # [connections.gsheets]
-                # spreadsheet = "你的谷歌表格链接"
                 try:
+                    # 创建连接
                     conn = st.connection("gsheets", type=GSheetsConnection)
                     
-                    if st.button("📥 从云端加载数据"):
-                        with st.spinner("正在拉取数据..."):
-                            df_cloud = conn.read(worksheet="ledger", usecols=list(range(15))) # 假设列
-                            # 实际使用建议序列化为JSON存储在单元格或分Sheet存储
-                            # 这里为简化演示，提示用户
-                            st.warning("请先配置 secrets.toml 连接到您的 Google Sheet")
-                            # 真实逻辑示例:
-                            # st.session_state.ledger = conn.read(worksheet="ledger")
-                            # st.session_state.rooms_db = conn.read(worksheet="rooms")
-                            # st.rerun()
-                            
+                    # 1. 保存按钮
                     if st.button("💾 保存当前数据到云端"):
-                        with st.spinner("正在上传..."):
-                            # conn.update(worksheet="ledger", data=st.session_state.ledger)
-                            st.warning("请配置 secrets.toml")
+                        with st.spinner("正在连接 Google Sheets..."):
+                            try:
+                                # 写入数据到名为 'ledger' 的工作表
+                                # 如果您的表格里没有这个sheet，插件会自动创建或使用默认
+                                conn.update(worksheet="ledger", data=st.session_state.ledger)
+                                st.success("✅ 保存成功！数据已同步到 Google Sheet")
+                            except Exception as e:
+                                st.error(f"保存失败: {e}")
+                                st.caption("请检查：1.Secrets配置是否正确 2.Google Sheet是否开启了'任何人可编辑'权限")
+
+                    # 2. 加载按钮
+                    if st.button("📥 从云端恢复数据"):
+                        with st.spinner("正在拉取数据..."):
+                            try:
+                                # 从 'ledger' 工作表读取
+                                df_cloud = conn.read(worksheet="ledger")
+                                # 简单的清洗，防止空行
+                                df_cloud = df_cloud.dropna(how='all')
+                                # 更新到内存
+                                st.session_state.ledger = df_cloud
+                                st.success("✅ 恢复成功！")
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"读取失败: {e}")
                 except Exception as e:
-                    st.error(f"连接失败: {e}")
+                    st.error(f"连接初始化失败: {e}")
             else:
-                st.caption("⚠️ 未检测到 `streamlit-gsheets` 库，仅支持本地内存模式。")
-                st.caption("部署时请在 requirements.txt 添加库。")
+                st.error("⚠️ 未检测到云端组件，请检查 requirements.txt")
 
         st.divider()
         menu = st.radio("导航", ["📊 财务驾驶舱", "📝 物业费录入", "🅿️ 车位管理(独立)", "📨 减免与审批", "🔍 综合查询", "📥 数据导入", "🛡️ 审计日志", "⚙️ 基础配置"])
@@ -576,3 +585,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

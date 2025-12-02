@@ -5,16 +5,17 @@ from dateutil import parser
 import plotly.express as px
 import uuid
 import time
+import io
 
-# --- 尝试导入云数据库连接库 ---
+# --- 尝试导入 SFTP 库 ---
 try:
-    from streamlit_gsheets import GSheetsConnection
-    HAS_GSHEETS = True
+    import paramiko
+    HAS_SFTP = True
 except ImportError:
-    HAS_GSHEETS = False
+    HAS_SFTP = False
 
 # --- 页面配置 ---
-st.set_page_config(page_title="世纪名城智慧收费系统 V10.4", layout="wide", page_icon="🏢")
+st.set_page_config(page_title="世纪名城智慧收费系统 V11.0 (NAS版)", layout="wide", page_icon="🏢")
 
 # --- 0. 数据库初始化 ---
 def init_df(key, columns):
@@ -89,6 +90,55 @@ def smart_read_file(uploaded_file, header_keywords=None):
                 return pd.read_csv(uploaded_file, header=header_row, encoding='gbk')
         else: return pd.read_excel(uploaded_file, header=header_row)
     return df_raw
+
+# --- NAS 同步工具函数 (V11.0 新增) ---
+def get_sftp_client():
+    """建立 SFTP 连接"""
+    try:
+        cfg = st.secrets.connections.nas
+        transport = paramiko.Transport((cfg.host, int(cfg.port)))
+        transport.connect(username=cfg.username, password=cfg.password)
+        sftp = paramiko.SFTPClient.from_transport(transport)
+        return sftp, transport
+    except Exception as e:
+        st.error(f"无法连接 NAS: {e}")
+        return None, None
+
+def save_df_to_nas(sftp, df, filename):
+    """将 DataFrame 转为 CSV 并上传到 NAS"""
+    try:
+        cfg = st.secrets.connections.nas
+        remote_path = f"{cfg.folder_path.rstrip('/')}/{filename}"
+        
+        # 转为 CSV 字节流
+        csv_buffer = io.BytesIO()
+        df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
+        csv_buffer.seek(0)
+        
+        # 上传
+        sftp.putfo(csv_buffer, remote_path)
+        return True
+    except Exception as e:
+        st.error(f"上传 {filename} 失败: {e}")
+        return False
+
+def load_df_from_nas(sftp, filename):
+    """从 NAS 下载 CSV 并转为 DataFrame"""
+    try:
+        cfg = st.secrets.connections.nas
+        remote_path = f"{cfg.folder_path.rstrip('/')}/{filename}"
+        
+        # 下载到字节流
+        csv_buffer = io.BytesIO()
+        sftp.getfo(remote_path, csv_buffer)
+        csv_buffer.seek(0)
+        
+        return pd.read_csv(csv_buffer)
+    except FileNotFoundError:
+        return pd.DataFrame() # 文件不存在返回空
+    except Exception as e:
+        st.error(f"下载 {filename} 失败: {e}")
+        return None
 
 # --- 2. 导入逻辑 ---
 
@@ -273,10 +323,10 @@ def check_login():
     if not st.session_state.logged_in:
         c1, c2, c3 = st.columns([1,2,1])
         with c2:
-            st.markdown("## 🔐 世纪名城 V10.4")
+            st.markdown("## 🔐 世纪名城 V11.0 (NAS版)")
             user = st.text_input("账号")
             pwd = st.text_input("密码", type="password")
-            if st.button("登录", width='stretch'): # 修复 UI warning
+            if st.button("登录", width='stretch'):
                 if user in USERS and USERS[user]["pass"] == pwd:
                     st.session_state.logged_in = True
                     st.session_state.username = user
@@ -300,54 +350,49 @@ def main():
         st.title("🏢 世纪名城")
         st.info(f"👤 {user} | {role}")
         
-        # --- 云端数据同步 (配置医生版) ---
-        with st.expander("☁️ 云端数据同步", expanded=True):
-            if HAS_GSHEETS:
-                # 诊断区域
-                try:
-                    secrets_status = "❌ 未配置"
-                    if "connections" in st.secrets and "gsheets" in st.secrets.connections:
-                        conf = st.secrets.connections.gsheets
-                        if "private_key" in conf:
-                            secrets_status = "✅ 已配置 (服务账号)"
-                        elif "spreadsheet" in conf:
-                            secrets_status = "⚠️ 仅配置了链接 (无法写入)"
-                    st.caption(f"配置状态: {secrets_status}")
-                except: pass
+        # --- NAS 同步模块 (V11.0 核心) ---
+        with st.expander("☁️ 群晖 NAS 数据同步", expanded=True):
+            if HAS_SFTP:
+                if st.button("💾 上传数据到 NAS"):
+                    if st.session_state.ledger.empty:
+                        st.warning("暂无数据")
+                    else:
+                        with st.spinner("连接 NAS 上传中..."):
+                            sftp, transport = get_sftp_client()
+                            if sftp:
+                                # 保存4张核心表
+                                ok1 = save_df_to_nas(sftp, st.session_state.ledger, "ledger.csv")
+                                ok2 = save_df_to_nas(sftp, st.session_state.parking_ledger, "parking.csv")
+                                ok3 = save_df_to_nas(sftp, st.session_state.rooms_db, "rooms.csv")
+                                ok4 = save_df_to_nas(sftp, st.session_state.waiver_requests, "waiver.csv")
+                                
+                                sftp.close()
+                                transport.close()
+                                
+                                if ok1 and ok2: st.success("✅ 数据已安全备份到 NAS")
+                                else: st.error("部分数据上传失败")
 
-                try:
-                    conn = st.connection("gsheets", type=GSheetsConnection)
-                    
-                    if st.button("💾 保存当前数据到云端"):
-                        if st.session_state.ledger.empty and st.session_state.parking_ledger.empty:
-                            st.warning("暂无数据可保存")
-                        else:
-                            with st.spinner("正在数据消毒并上传..."):
-                                try:
-                                    # V10.4 关键修复: 数据清洗，填充空值，强制转字符串
-                                    df_save = st.session_state.ledger.fillna("").astype(str)
-                                    conn.update(worksheet="ledger", data=df_save)
-                                    st.success("✅ 保存成功！")
-                                except Exception as e:
-                                    st.error(f"保存失败: {str(e)}")
-                                    if "403" in str(e) or "PERMISSION_DENIED" in str(e):
-                                        st.error("权限拒绝！请检查：1.Secrets是否填入了JSON内容(private_key) 2.表格是否给机器人开了Editor权限")
-
-                    if st.button("📥 从云端恢复数据"):
-                        with st.spinner("正在拉取..."):
-                            try:
-                                df_cloud = conn.read(worksheet="ledger", ttl=0)
-                                df_cloud = df_cloud.dropna(how='all')
-                                st.session_state.ledger = df_cloud
-                                st.success("✅ 恢复成功！")
-                                time.sleep(1)
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"读取失败: {str(e)}")
-                except Exception as e:
-                    st.error(f"连接组件错误: {e}")
+                if st.button("📥 从 NAS 恢复数据"):
+                    with st.spinner("正在从 NAS 下载..."):
+                        sftp, transport = get_sftp_client()
+                        if sftp:
+                            df1 = load_df_from_nas(sftp, "ledger.csv")
+                            df2 = load_df_from_nas(sftp, "parking.csv")
+                            df3 = load_df_from_nas(sftp, "rooms.csv")
+                            df4 = load_df_from_nas(sftp, "waiver.csv")
+                            
+                            if df1 is not None: st.session_state.ledger = df1
+                            if df2 is not None: st.session_state.parking_ledger = df2
+                            if df3 is not None: st.session_state.rooms_db = df3
+                            if df4 is not None: st.session_state.waiver_requests = df4
+                            
+                            sftp.close()
+                            transport.close()
+                            st.success("✅ 数据已恢复")
+                            time.sleep(1)
+                            st.rerun()
             else:
-                st.error("⚠️ 缺少 st-gsheets-connection 库")
+                st.error("❌ 未安装 paramiko 库，无法连接 SSH")
 
         st.divider()
         menu = st.radio("导航", ["📊 财务驾驶舱", "📝 物业费录入", "🅿️ 车位管理(独立)", "📨 减免与审批", "🔍 综合查询", "📥 数据导入", "🛡️ 审计日志", "⚙️ 基础配置"])
@@ -477,7 +522,7 @@ def main():
             res = df[df['房号'].astype(str).str.contains(q, na=False) | df['业主'].astype(str).str.contains(q, na=False) | df['收据编号'].astype(str).str.contains(q, na=False)]
             st.dataframe(res, width='stretch')
             
-            st.markdown("### 📸 欠费/结清快照")
+            st.markdown("### 📸 欠费/结清快照 (按户合并)")
             if not res.empty:
                 snap = res.groupby(['房号','业主','费用类型']).agg({
                     '应收':'sum', '实收':'sum', '减免金额':'sum'

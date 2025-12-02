@@ -5,6 +5,7 @@ from dateutil import parser
 import plotly.express as px
 import uuid
 import time
+import socket
 import io
 
 # --- 尝试导入 SFTP 库 ---
@@ -91,17 +92,33 @@ def smart_read_file(uploaded_file, header_keywords=None):
         else: return pd.read_excel(uploaded_file, header=header_row)
     return df_raw
 
-# --- NAS 同步工具函数 (V11.0 新增) ---
+# --- NAS 同步工具函数 (V11.1 强制IPv4修复版) ---
 def get_sftp_client():
-    """建立 SFTP 连接"""
+    """建立 SFTP 连接 (强制解析 IPv4)"""
     try:
         cfg = st.secrets.connections.nas
-        transport = paramiko.Transport((cfg.host, int(cfg.port)))
+        host = cfg.host
+        port = int(cfg.port)
+        
+        # 1. 强制进行 DNS 解析获取 IPv4 地址
+        # 这步操作是为了避开 [Errno 99] IPv6 连接错误
+        try:
+            target_ip = socket.gethostbyname(host)
+            # st.toast(f"DNS解析成功: {host} -> {target_ip}") # 调试用，可注释
+        except Exception as e:
+            st.error(f"DNS 解析失败: 无法找到 {host} 的 IPv4 地址。请检查 DDNS 设置。错误: {e}")
+            return None, None
+
+        # 2. 使用解析出的 IPv4 地址建立连接
+        transport = paramiko.Transport((target_ip, port))
         transport.connect(username=cfg.username, password=cfg.password)
         sftp = paramiko.SFTPClient.from_transport(transport)
         return sftp, transport
     except Exception as e:
-        st.error(f"无法连接 NAS: {e}")
+        st.error(f"无法连接 NAS ({host}:{port}): {e}")
+        # 增加提示：如果是连接超时，可能是端口映射问题或没有公网IP
+        if "time" in str(e).lower() or "timeout" in str(e).lower():
+            st.warning("提示: 连接超时。请检查：1.家里宽带是否有公网IPv4？ 2.路由器端口映射(Port Forwarding)是否生效？")
         return None, None
 
 def save_df_to_nas(sftp, df, filename):
@@ -615,3 +632,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

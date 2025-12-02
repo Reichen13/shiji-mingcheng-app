@@ -326,7 +326,7 @@ def main():
         st.title("🏢 世纪名城")
         st.info(f"👤 {user} | {role}")
         
-        # --- V10.1 激活: 云端数据同步 (功能实装版) ---
+      # --- V10.1 激活: 云端数据同步 (功能实装版) ---
         with st.expander("☁️ 云端数据同步 (Google Sheets)", expanded=False):
             if HAS_GSHEETS:
                 try:
@@ -585,4 +585,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

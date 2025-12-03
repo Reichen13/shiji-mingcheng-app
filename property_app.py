@@ -15,7 +15,7 @@ except ImportError:
     HAS_GITHUB = False
 
 # --- 页面配置 ---
-st.set_page_config(page_title="世纪名城智慧收费系统 V12.3", layout="wide", page_icon="🏢")
+st.set_page_config(page_title="世纪名城智慧收费系统 V12.5", layout="wide", page_icon="🏢")
 
 # --- 0. 数据库初始化 ---
 def init_df(key, columns):
@@ -27,6 +27,16 @@ init_df('parking_ledger', ['流水号', '车位编号', '车位类型', '业主/
 init_df('rooms_db', ["房号", "业主", "联系电话", "备用电话", "房屋状态", "收费面积", "物业费单价", "物业费标准/年", "电梯费标准/年"])
 init_df('waiver_requests', ['申请单号', '房号', '业主', '费用类型', '原应收', '申请减免金额', '拟实收', '申请原因', '申请人', '申请时间', '审批状态', '审批意见', '审批人'])
 init_df('audit_logs', ['时间', '操作人', '动作', '详情'])
+
+# V12.5 新增：用户数据库初始化 (支持 DataFrame 格式以便存储)
+if 'user_db_df' not in st.session_state:
+    # 默认账号
+    default_users = [
+        {"username": "admin", "password": "admin123", "role": "管理员"},
+        {"username": "audit", "password": "audit123", "role": "审核员"},
+        {"username": "clerk", "password": "clerk123", "role": "录入员"}
+    ]
+    st.session_state.user_db_df = pd.DataFrame(default_users)
 
 if 'parking_types' not in st.session_state:
     st.session_state.parking_types = ["产权车位", "月租车位", "子母车位", "临时车位"]
@@ -91,7 +101,7 @@ def smart_read_file(uploaded_file, header_keywords=None):
         else: return pd.read_excel(uploaded_file, header=header_row)
     return df_raw
 
-# --- Gist 同步工具函数 ---
+# --- Gist 同步工具函数 (V12.5 升级版：含用户数据) ---
 def get_gist_client():
     try:
         token = st.secrets.connections.github.token
@@ -102,7 +112,6 @@ def get_gist_client():
         return None
 
 def save_to_gist():
-    """将所有 session_state 数据打包存入 Gist"""
     g = get_gist_client()
     if not g: return False
     
@@ -110,30 +119,18 @@ def save_to_gist():
         gist_id = st.secrets.connections.github.gist_id
         gist = g.get_gist(gist_id)
         
-        # 将 DataFrame 转为 CSV 字符串
         files_content = {}
         
-        # 1. 物业台账
-        ledger_csv = st.session_state.ledger.to_csv(index=False)
-        files_content["ledger.csv"] = InputFileContent(ledger_csv)
+        # 核心业务数据
+        files_content["ledger.csv"] = InputFileContent(st.session_state.ledger.fillna("").astype(str).to_csv(index=False))
+        files_content["parking.csv"] = InputFileContent(st.session_state.parking_ledger.fillna("").astype(str).to_csv(index=False))
+        files_content["rooms.csv"] = InputFileContent(st.session_state.rooms_db.fillna("").astype(str).to_csv(index=False))
+        files_content["waiver.csv"] = InputFileContent(st.session_state.waiver_requests.fillna("").astype(str).to_csv(index=False))
+        files_content["audit.csv"] = InputFileContent(st.session_state.audit_logs.fillna("").astype(str).to_csv(index=False))
         
-        # 2. 车位台账
-        park_csv = st.session_state.parking_ledger.to_csv(index=False)
-        files_content["parking.csv"] = InputFileContent(park_csv)
-        
-        # 3. 基础信息
-        rooms_csv = st.session_state.rooms_db.to_csv(index=False)
-        files_content["rooms.csv"] = InputFileContent(rooms_csv)
-        
-        # 4. 审批单
-        waiver_csv = st.session_state.waiver_requests.to_csv(index=False)
-        files_content["waiver.csv"] = InputFileContent(waiver_csv)
+        # V12.5 新增：用户数据同步
+        files_content["users.csv"] = InputFileContent(st.session_state.user_db_df.to_csv(index=False))
 
-        # 5. 日志
-        log_csv = st.session_state.audit_logs.to_csv(index=False)
-        files_content["audit.csv"] = InputFileContent(log_csv)
-
-        # 更新 Gist
         gist.edit(files=files_content)
         return True
     except Exception as e:
@@ -141,7 +138,6 @@ def save_to_gist():
         return False
 
 def load_from_gist():
-    """从 Gist 读取数据"""
     g = get_gist_client()
     if not g: return False
     
@@ -171,6 +167,10 @@ def load_from_gist():
         
         df5 = read_gist_csv("audit.csv")
         if not df5.empty: st.session_state.audit_logs = df5
+        
+        # V12.5 新增：读取用户数据
+        df6 = read_gist_csv("users.csv")
+        if not df6.empty: st.session_state.user_db_df = df6
         
         return True
     except Exception as e:
@@ -345,12 +345,7 @@ def process_parking_import(file_park):
                 except: continue
     return imported_park
 
-# --- 3. 权限与登录 (V12.3 修复版) ---
-USERS = {
-    "admin": {"pass": "admin123", "role": "管理员"},
-    "audit": {"pass": "audit123", "role": "审核员"},
-    "clerk": {"pass": "clerk123", "role": "录入员"}
-}
+# --- 3. 权限与登录 (V12.5 数据库版) ---
 
 def check_login():
     if "logged_in" not in st.session_state:
@@ -361,24 +356,32 @@ def check_login():
     if not st.session_state.logged_in:
         c1, c2, c3 = st.columns([1,2,1])
         with c2:
-            st.markdown("## 🔐 世纪名城 V12.3")
+            st.markdown("## 🔐 世纪名城 V12.5")
             st.info("手机登录提示：请检查是否有空格或自动大写")
             
             user_input = st.text_input("账号")
             pwd_input = st.text_input("密码", type="password")
             
             if st.button("登录", use_container_width=True):
-                # 手机端兼容处理
                 clean_user = user_input.strip().lower()
                 clean_pwd = pwd_input.strip()
-
-                if clean_user in USERS and USERS[clean_user]["pass"] == clean_pwd:
-                    st.session_state.logged_in = True
-                    st.session_state.username = clean_user
-                    st.session_state.user_role = USERS[clean_user]["role"]
-                    st.rerun()
+                
+                # 从 DataFrame 验证
+                user_df = st.session_state.user_db_df
+                # 筛选用户
+                matched_user = user_df[user_df['username'] == clean_user]
+                
+                if not matched_user.empty:
+                    stored_pwd = str(matched_user.iloc[0]['password'])
+                    if stored_pwd == clean_pwd:
+                        st.session_state.logged_in = True
+                        st.session_state.username = clean_user
+                        st.session_state.user_role = matched_user.iloc[0]['role']
+                        st.rerun()
+                    else:
+                        st.error("密码错误")
                 else:
-                    st.error(f"登录失败，识别账号为: [{clean_user}]")
+                    st.error("账号不存在")
         return False
     return True
 
@@ -403,11 +406,11 @@ def main():
                     if st.session_state.ledger.empty and st.session_state.parking_ledger.empty:
                         st.warning("暂无数据可保存")
                     else:
-                        with st.spinner("正在同步到 GitHub Gist..."):
+                        with st.spinner("正在同步所有数据 (含账号)..."):
                             if save_to_gist():
                                 st.success("✅ 数据库已同步！")
                             else:
-                                st.error("保存失败，请检查 Secrets 配置")
+                                st.error("保存失败")
 
                 if st.button("📥 从 Gist 恢复数据"):
                     with st.spinner("正在拉取..."):
@@ -416,12 +419,12 @@ def main():
                             time.sleep(1)
                             st.rerun()
                         else:
-                            st.error("读取失败，请检查 Secrets 配置")
+                            st.error("读取失败")
             else:
-                st.error("❌ 缺少 PyGithub 库，请更新 requirements.txt")
+                st.error("❌ 缺少 PyGithub 库")
 
         st.divider()
-        menu = st.radio("导航", ["📊 财务驾驶舱", "📝 物业费录入", "🅿️ 车位管理(独立)", "📨 减免与审批", "🔍 综合查询", "📥 数据导入", "🛡️ 审计日志", "⚙️ 基础配置"])
+        menu = st.radio("导航", ["📊 财务驾驶舱", "📝 物业费录入", "🅿️ 车位管理(独立)", "📨 减免与审批", "🔍 综合查询", "📥 数据导入", "🛡️ 审计日志", "⚙️ 基础配置", "👤 个人中心"])
         if st.button("退出"): logout()
 
     # === 财务驾驶舱 ===
@@ -632,6 +635,31 @@ def main():
                                 st.rerun()
                 else: st.info("无待办")
             else: st.error("无权")
+
+    # === V12.5 新增: 个人中心 (密码修改) ===
+    elif menu == "👤 个人中心":
+        st.title("👤 个人中心")
+        st.write(f"当前用户: **{user}**")
+        st.divider()
+        st.subheader("🔑 修改密码")
+        
+        with st.form("pwd"):
+            old_p = st.text_input("原密码", type="password")
+            new_p1 = st.text_input("新密码", type="password")
+            new_p2 = st.text_input("确认新密码", type="password")
+            if st.form_submit_button("确认修改"):
+                # 从 df 中查找用户索引
+                u_idx = st.session_state.user_db_df[st.session_state.user_db_df['username'] == user].index
+                if not u_idx.empty:
+                    current_pwd = str(st.session_state.user_db_df.at[u_idx[0], 'password'])
+                    if old_p != current_pwd:
+                        st.error("原密码错误")
+                    elif new_p1 != new_p2:
+                        st.error("两次密码不一致")
+                    else:
+                        st.session_state.user_db_df.at[u_idx[0], 'password'] = new_p1
+                        st.success("密码修改成功！请点击'保存到云端'以永久生效。")
+                        log_action(user, "修改密码", "用户自行修改了密码")
 
     elif menu == "🛡️ 审计日志":
         if role=="管理员": st.dataframe(st.session_state.audit_logs, use_container_width=True)

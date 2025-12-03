@@ -15,7 +15,7 @@ except ImportError:
     HAS_GITHUB = False
 
 # --- 页面配置 ---
-st.set_page_config(page_title="世纪名城智慧收费系统 V12.2", layout="wide", page_icon="🏢")
+st.set_page_config(page_title="世纪名城智慧收费系统 V12.3", layout="wide", page_icon="🏢")
 
 # --- 0. 数据库初始化 ---
 def init_df(key, columns):
@@ -150,16 +150,13 @@ def load_from_gist():
         gist = g.get_gist(gist_id)
         files = gist.files
         
-        # 辅助读取函数
         def read_gist_csv(filename):
             if filename in files:
                 content = files[filename].content
-                # 兼容空文件情况
                 if not content.strip(): return pd.DataFrame()
                 return pd.read_csv(io.StringIO(content)).fillna("")
             return pd.DataFrame()
 
-        # 读取并更新 session_state
         df1 = read_gist_csv("ledger.csv")
         if not df1.empty: st.session_state.ledger = df1
         
@@ -348,7 +345,7 @@ def process_parking_import(file_park):
                 except: continue
     return imported_park
 
-# --- 3. 权限 ---
+# --- 3. 权限与登录 (V12.3 修复版) ---
 USERS = {
     "admin": {"pass": "admin123", "role": "管理员"},
     "audit": {"pass": "audit123", "role": "审核员"},
@@ -360,19 +357,28 @@ def check_login():
         st.session_state.logged_in = False
         st.session_state.username = ""
         st.session_state.user_role = ""
+
     if not st.session_state.logged_in:
         c1, c2, c3 = st.columns([1,2,1])
         with c2:
-            st.markdown("## 🔐 世纪名城 V12.2")
-            user = st.text_input("账号")
-            pwd = st.text_input("密码", type="password")
-            if st.button("登录", width='stretch'):
-                if user in USERS and USERS[user]["pass"] == pwd:
+            st.markdown("## 🔐 世纪名城 V12.3")
+            st.info("手机登录提示：请检查是否有空格或自动大写")
+            
+            user_input = st.text_input("账号")
+            pwd_input = st.text_input("密码", type="password")
+            
+            if st.button("登录", use_container_width=True):
+                # 手机端兼容处理
+                clean_user = user_input.strip().lower()
+                clean_pwd = pwd_input.strip()
+
+                if clean_user in USERS and USERS[clean_user]["pass"] == clean_pwd:
                     st.session_state.logged_in = True
-                    st.session_state.username = user
-                    st.session_state.user_role = USERS[user]["role"]
+                    st.session_state.username = clean_user
+                    st.session_state.user_role = USERS[clean_user]["role"]
                     st.rerun()
-                else: st.error("账号或密码错误")
+                else:
+                    st.error(f"登录失败，识别账号为: [{clean_user}]")
         return False
     return True
 
@@ -401,7 +407,7 @@ def main():
                             if save_to_gist():
                                 st.success("✅ 数据库已同步！")
                             else:
-                                pass # Error handled in function
+                                st.error("保存失败，请检查 Secrets 配置")
 
                 if st.button("📥 从 Gist 恢复数据"):
                     with st.spinner("正在拉取..."):
@@ -409,6 +415,8 @@ def main():
                             st.success("✅ 恢复成功！")
                             time.sleep(1)
                             st.rerun()
+                        else:
+                            st.error("读取失败，请检查 Secrets 配置")
             else:
                 st.error("❌ 缺少 PyGithub 库，请更新 requirements.txt")
 
@@ -457,13 +465,13 @@ def main():
             t1, t2 = st.tabs(["🔴 欠费户明细", "🟢 溢缴/预收户明细"])
             with t1:
                 owe_df = agg_df[agg_df['余额'] > 0.1].sort_values('余额', ascending=False)
-                if not owe_df.empty: st.dataframe(owe_df.rename(columns={'余额':'欠费金额'}), width='stretch')
+                if not owe_df.empty: st.dataframe(owe_df.rename(columns={'余额':'欠费金额'}), use_container_width=True)
                 else: st.success("无欠费")
             with t2:
                 pre_df = agg_df[agg_df['余额'] < -0.1].sort_values('余额', ascending=True)
                 if not pre_df.empty:
                     pre_df['溢缴金额'] = pre_df['余额'] * -1
-                    st.dataframe(pre_df[['房号','业主','应收','实收','溢缴金额']], width='stretch')
+                    st.dataframe(pre_df[['房号','业主','应收','实收','溢缴金额']], use_container_width=True)
                 else: st.info("无预收")
 
     # === 物业费录入 ===
@@ -528,7 +536,7 @@ def main():
                     time.sleep(1)
                     st.rerun()
         with t2:
-            st.dataframe(st.session_state.parking_ledger, width='stretch')
+            st.dataframe(st.session_state.parking_ledger, use_container_width=True)
 
     # === 综合查询 ===
     elif menu == "🔍 综合查询":
@@ -538,9 +546,9 @@ def main():
             st.markdown("### 📜 交易流水")
             df = st.session_state.ledger
             res = df[df['房号'].astype(str).str.contains(q, na=False) | df['业主'].astype(str).str.contains(q, na=False) | df['收据编号'].astype(str).str.contains(q, na=False)]
-            st.dataframe(res, width='stretch')
+            st.dataframe(res, use_container_width=True)
             
-            st.markdown("### 📸 欠费/结清快照 (按户合并)")
+            st.markdown("### 📸 欠费/结清快照")
             if not res.empty:
                 snap = res.groupby(['房号','业主','费用类型']).agg({
                     '应收':'sum', '实收':'sum', '减免金额':'sum'
@@ -550,7 +558,7 @@ def main():
                     if row['余额'] > 0.1: return ['background-color: #ffcccc'] * len(row)
                     if row['余额'] < -0.1: return ['background-color: #ccffcc'] * len(row)
                     return [''] * len(row)
-                st.dataframe(snap.style.apply(style_snap, axis=1).format("{:.2f}", subset=['应收','实收','余额']), width='stretch')
+                st.dataframe(snap.style.apply(style_snap, axis=1).format("{:.2f}", subset=['应收','实收','余额']), use_container_width=True)
 
     # === 数据导入 ===
     elif menu == "📥 数据导入":
@@ -626,10 +634,10 @@ def main():
             else: st.error("无权")
 
     elif menu == "🛡️ 审计日志":
-        if role=="管理员": st.dataframe(st.session_state.audit_logs, width='stretch')
+        if role=="管理员": st.dataframe(st.session_state.audit_logs, use_container_width=True)
         else: st.error("无权")
     elif menu == "⚙️ 基础配置":
-        st.data_editor(st.session_state.rooms_db, width='stretch')
+        st.data_editor(st.session_state.rooms_db, use_container_width=True)
 
 if __name__ == "__main__":
     main()

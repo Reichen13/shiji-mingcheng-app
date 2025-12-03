@@ -3,5 +3,5 @@ pandas
 plotly
 python-dateutil
 openpyxl
-paramiko
+PyGithub
 

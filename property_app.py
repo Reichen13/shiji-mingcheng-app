@@ -5,18 +5,17 @@ from dateutil import parser
 import plotly.express as px
 import uuid
 import time
-import socket
 import io
 
-# --- 尝试导入 SFTP 库 ---
+# --- 尝试导入 GitHub 库 ---
 try:
-    import paramiko
-    HAS_SFTP = True
+    from github import Github
+    HAS_GITHUB = True
 except ImportError:
-    HAS_SFTP = False
+    HAS_GITHUB = False
 
 # --- 页面配置 ---
-st.set_page_config(page_title="世纪名城智慧收费系统 V11.0 (NAS版)", layout="wide", page_icon="🏢")
+st.set_page_config(page_title="世纪名城智慧收费系统 V12.0 (Gist版)", layout="wide", page_icon="🏢")
 
 # --- 0. 数据库初始化 ---
 def init_df(key, columns):
@@ -92,70 +91,98 @@ def smart_read_file(uploaded_file, header_keywords=None):
         else: return pd.read_excel(uploaded_file, header=header_row)
     return df_raw
 
-# --- NAS 同步工具函数 (V11.1 强制IPv4修复版) ---
-def get_sftp_client():
-    """建立 SFTP 连接 (强制解析 IPv4)"""
+# --- Gist 同步工具函数 (V12.0) ---
+def get_gist_client():
     try:
-        cfg = st.secrets.connections.nas
-        host = cfg.host
-        port = int(cfg.port)
-        
-        # 1. 强制进行 DNS 解析获取 IPv4 地址
-        # 这步操作是为了避开 [Errno 99] IPv6 连接错误
-        try:
-            target_ip = socket.gethostbyname(host)
-            # st.toast(f"DNS解析成功: {host} -> {target_ip}") # 调试用，可注释
-        except Exception as e:
-            st.error(f"DNS 解析失败: 无法找到 {host} 的 IPv4 地址。请检查 DDNS 设置。错误: {e}")
-            return None, None
-
-        # 2. 使用解析出的 IPv4 地址建立连接
-        transport = paramiko.Transport((target_ip, port))
-        transport.connect(username=cfg.username, password=cfg.password)
-        sftp = paramiko.SFTPClient.from_transport(transport)
-        return sftp, transport
+        token = st.secrets.connections.github.token
+        g = Github(token)
+        return g
     except Exception as e:
-        st.error(f"无法连接 NAS ({host}:{port}): {e}")
-        # 增加提示：如果是连接超时，可能是端口映射问题或没有公网IP
-        if "time" in str(e).lower() or "timeout" in str(e).lower():
-            st.warning("提示: 连接超时。请检查：1.家里宽带是否有公网IPv4？ 2.路由器端口映射(Port Forwarding)是否生效？")
-        return None, None
+        st.error(f"GitHub 连接失败: {e}")
+        return None
 
-def save_df_to_nas(sftp, df, filename):
-    """将 DataFrame 转为 CSV 并上传到 NAS"""
+def save_to_gist():
+    """将所有 session_state 数据打包存入 Gist"""
+    g = get_gist_client()
+    if not g: return False
+    
     try:
-        cfg = st.secrets.connections.nas
-        remote_path = f"{cfg.folder_path.rstrip('/')}/{filename}"
+        gist_id = st.secrets.connections.github.gist_id
+        gist = g.get_gist(gist_id)
         
-        # 转为 CSV 字节流
-        csv_buffer = io.BytesIO()
-        df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
-        csv_buffer.seek(0)
+        # 将 DataFrame 转为 CSV 字符串
+        files_content = {}
         
-        # 上传
-        sftp.putfo(csv_buffer, remote_path)
+        # 1. 物业台账
+        ledger_csv = st.session_state.ledger.to_csv(index=False)
+        files_content["ledger.csv"] =  st.secrets.InputFileContent(ledger_csv)
+        
+        # 2. 车位台账
+        park_csv = st.session_state.parking_ledger.to_csv(index=False)
+        files_content["parking.csv"] = st.secrets.InputFileContent(park_csv)
+        
+        # 3. 基础信息
+        rooms_csv = st.session_state.rooms_db.to_csv(index=False)
+        files_content["rooms.csv"] = st.secrets.InputFileContent(rooms_csv)
+        
+        # 4. 审批单
+        waiver_csv = st.session_state.waiver_requests.to_csv(index=False)
+        files_content["waiver.csv"] = st.secrets.InputFileContent(waiver_csv)
+
+        # 5. 日志
+        log_csv = st.session_state.audit_logs.to_csv(index=False)
+        files_content["audit.csv"] = st.secrets.InputFileContent(log_csv)
+
+        # 更新 Gist (GitHub API 要求 InputFileContent 对象，这里PyGithub会自动处理字典)
+        # PyGithub update expects: update(description=..., files={'filename': InputFileContent(...)})
+        # 但 simpler way: pass dictionary of filename -> InputFileContent
+        
+        from github import InputFileContent
+        payload = {k: InputFileContent(v.content) for k, v in files_content.items()}
+        
+        gist.edit(files=payload)
         return True
     except Exception as e:
-        st.error(f"上传 {filename} 失败: {e}")
+        st.error(f"Gist 保存失败: {e}")
         return False
 
-def load_df_from_nas(sftp, filename):
-    """从 NAS 下载 CSV 并转为 DataFrame"""
+def load_from_gist():
+    """从 Gist 读取数据"""
+    g = get_gist_client()
+    if not g: return False
+    
     try:
-        cfg = st.secrets.connections.nas
-        remote_path = f"{cfg.folder_path.rstrip('/')}/{filename}"
+        gist_id = st.secrets.connections.github.gist_id
+        gist = g.get_gist(gist_id)
+        files = gist.files
         
-        # 下载到字节流
-        csv_buffer = io.BytesIO()
-        sftp.getfo(remote_path, csv_buffer)
-        csv_buffer.seek(0)
+        # 辅助读取函数
+        def read_gist_csv(filename):
+            if filename in files:
+                content = files[filename].content
+                return pd.read_csv(io.StringIO(content)).fillna("")
+            return pd.DataFrame()
+
+        # 读取并更新 session_state
+        df1 = read_gist_csv("ledger.csv")
+        if not df1.empty: st.session_state.ledger = df1
         
-        return pd.read_csv(csv_buffer)
-    except FileNotFoundError:
-        return pd.DataFrame() # 文件不存在返回空
+        df2 = read_gist_csv("parking.csv")
+        if not df2.empty: st.session_state.parking_ledger = df2
+        
+        df3 = read_gist_csv("rooms.csv")
+        if not df3.empty: st.session_state.rooms_db = df3
+        
+        df4 = read_gist_csv("waiver.csv")
+        if not df4.empty: st.session_state.waiver_requests = df4
+        
+        df5 = read_gist_csv("audit.csv")
+        if not df5.empty: st.session_state.audit_logs = df5
+        
+        return True
     except Exception as e:
-        st.error(f"下载 {filename} 失败: {e}")
-        return None
+        st.error(f"Gist 读取失败: {e}")
+        return False
 
 # --- 2. 导入逻辑 ---
 
@@ -340,7 +367,7 @@ def check_login():
     if not st.session_state.logged_in:
         c1, c2, c3 = st.columns([1,2,1])
         with c2:
-            st.markdown("## 🔐 世纪名城 V11.0 (NAS版)")
+            st.markdown("## 🔐 世纪名城 V12.0")
             user = st.text_input("账号")
             pwd = st.text_input("密码", type="password")
             if st.button("登录", width='stretch'):
@@ -367,49 +394,29 @@ def main():
         st.title("🏢 世纪名城")
         st.info(f"👤 {user} | {role}")
         
-        # --- NAS 同步模块 (V11.0 核心) ---
-        with st.expander("☁️ 群晖 NAS 数据同步", expanded=True):
-            if HAS_SFTP:
-                if st.button("💾 上传数据到 NAS"):
-                    if st.session_state.ledger.empty:
+        # --- V12.0 Gist 同步模块 ---
+        with st.expander("☁️ Gist 数据库同步", expanded=True):
+            if HAS_GITHUB:
+                if st.button("💾 保存当前数据到 Gist"):
+                    if st.session_state.ledger.empty and st.session_state.parking_ledger.empty:
                         st.warning("暂无数据")
                     else:
-                        with st.spinner("连接 NAS 上传中..."):
-                            sftp, transport = get_sftp_client()
-                            if sftp:
-                                # 保存4张核心表
-                                ok1 = save_df_to_nas(sftp, st.session_state.ledger, "ledger.csv")
-                                ok2 = save_df_to_nas(sftp, st.session_state.parking_ledger, "parking.csv")
-                                ok3 = save_df_to_nas(sftp, st.session_state.rooms_db, "rooms.csv")
-                                ok4 = save_df_to_nas(sftp, st.session_state.waiver_requests, "waiver.csv")
-                                
-                                sftp.close()
-                                transport.close()
-                                
-                                if ok1 and ok2: st.success("✅ 数据已安全备份到 NAS")
-                                else: st.error("部分数据上传失败")
+                        with st.spinner("正在同步到 GitHub Gist..."):
+                            if save_to_gist():
+                                st.success("✅ 数据库已同步！")
+                            else:
+                                st.error("保存失败，请检查 Secrets 配置")
 
-                if st.button("📥 从 NAS 恢复数据"):
-                    with st.spinner("正在从 NAS 下载..."):
-                        sftp, transport = get_sftp_client()
-                        if sftp:
-                            df1 = load_df_from_nas(sftp, "ledger.csv")
-                            df2 = load_df_from_nas(sftp, "parking.csv")
-                            df3 = load_df_from_nas(sftp, "rooms.csv")
-                            df4 = load_df_from_nas(sftp, "waiver.csv")
-                            
-                            if df1 is not None: st.session_state.ledger = df1
-                            if df2 is not None: st.session_state.parking_ledger = df2
-                            if df3 is not None: st.session_state.rooms_db = df3
-                            if df4 is not None: st.session_state.waiver_requests = df4
-                            
-                            sftp.close()
-                            transport.close()
-                            st.success("✅ 数据已恢复")
+                if st.button("📥 从 Gist 恢复数据"):
+                    with st.spinner("正在拉取..."):
+                        if load_from_gist():
+                            st.success("✅ 恢复成功！")
                             time.sleep(1)
                             st.rerun()
+                        else:
+                            st.error("读取失败，请检查 Secrets 配置")
             else:
-                st.error("❌ 未安装 paramiko 库，无法连接 SSH")
+                st.error("❌ 缺少 PyGithub 库")
 
         st.divider()
         menu = st.radio("导航", ["📊 财务驾驶舱", "📝 物业费录入", "🅿️ 车位管理(独立)", "📨 减免与审批", "🔍 综合查询", "📥 数据导入", "🛡️ 审计日志", "⚙️ 基础配置"])
@@ -539,7 +546,7 @@ def main():
             res = df[df['房号'].astype(str).str.contains(q, na=False) | df['业主'].astype(str).str.contains(q, na=False) | df['收据编号'].astype(str).str.contains(q, na=False)]
             st.dataframe(res, width='stretch')
             
-            st.markdown("### 📸 欠费/结清快照 (按户合并)")
+            st.markdown("### 📸 欠费/结清快照")
             if not res.empty:
                 snap = res.groupby(['房号','业主','费用类型']).agg({
                     '应收':'sum', '实收':'sum', '减免金额':'sum'
@@ -632,4 +639,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

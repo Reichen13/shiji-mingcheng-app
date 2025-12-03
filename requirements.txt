@@ -4,4 +4,3 @@ plotly
 python-dateutil
 openpyxl
 PyGithub
-

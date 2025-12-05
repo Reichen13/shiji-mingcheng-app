@@ -21,7 +21,7 @@ except ImportError:
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="世纪名城 ERP | V19.0 数据校准版", 
+    page_title="世纪名城 ERP | V20.0 数据校准版", 
     layout="wide", 
     page_icon="🏙️",
     initial_sidebar_state="expanded"
@@ -72,6 +72,27 @@ def init_session():
 
 init_session()
 
+# --- [核心修复] 强力数据清洗工具 ---
+def clean_currency(val):
+    """
+    数据熔炉：将任何长得像数字的东西（带逗号、带¥、文本型数字）强制转为float
+    """
+    if pd.isna(val) or str(val).strip() == "" or str(val).lower() == 'nan':
+        return 0.0
+    # 移除千位分隔符逗号、货币符号、空格
+    clean_str = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
+    try:
+        return float(clean_str)
+    except:
+        return 0.0
+
+def clean_string_key(val):
+    """
+    Key熔炉：将房号强制转为字符串，防止 '101' 和 101 分家
+    """
+    if pd.isna(val): return "未知"
+    return str(val).strip()
+
 # --- Gist 同步 ---
 def get_gist_client():
     try:
@@ -92,7 +113,7 @@ def save_to_gist():
                   ("rooms.csv", st.session_state.rooms_db), ("waiver.csv", st.session_state.waiver_requests),
                   ("wallet.csv", st.session_state.wallet_db)]
         for fname, df in tables:
-            # 保存前强制转为字符串，避免科学计数法
+            # 保存前强制转为字符串，避免科学计数法丢失精度
             files_content[fname] = InputFileContent(df.fillna("").astype(str).to_csv(index=False))
         gist.edit(files=files_content)
         return True
@@ -106,20 +127,21 @@ def load_from_gist():
         gist_id = st.secrets.connections.github.gist_id
         gist = g.get_gist(gist_id)
         files = gist.files
-        def read_gist(fname):
-            # 强制所有列读取为字符串，后续按需转换，防止数据丢失
-            return pd.read_csv(io.StringIO(files[fname].content), dtype=str).fillna("") if fname in files else pd.DataFrame()
         
-        df_l = read_gist("ledger.csv")
-        if not df_l.empty: st.session_state.ledger = df_l
-        df_p = read_gist("parking.csv")
-        if not df_p.empty: st.session_state.parking_ledger = df_p
-        df_r = read_gist("rooms.csv")
-        if not df_r.empty: st.session_state.rooms_db = df_r
-        df_w = read_gist("waiver.csv")
-        if not df_w.empty: st.session_state.waiver_requests = df_w
-        df_wal = read_gist("wallet.csv")
-        if not df_wal.empty: st.session_state.wallet_db = df_wal
+        # [核心修复] 读取后立即进行初步清洗
+        def read_gist(fname):
+            if fname in files:
+                # 读为全文本，防止pandas自动推断错误
+                return pd.read_csv(io.StringIO(files[fname].content), dtype=str).fillna("")
+            return pd.DataFrame()
+        
+        # 恢复数据到 Session
+        st.session_state.ledger = read_gist("ledger.csv")
+        st.session_state.parking_ledger = read_gist("parking.csv")
+        st.session_state.rooms_db = read_gist("rooms.csv")
+        st.session_state.waiver_requests = read_gist("waiver.csv")
+        st.session_state.wallet_db = read_gist("wallet.csv")
+        
         return True
     except: return False
 
@@ -138,12 +160,9 @@ def update_wallet(room, owner, amount, trans_type, ref_id, remark, user):
         st.session_state.wallet_db = safe_concat([st.session_state.wallet_db, new_wallet])
         w_idx = st.session_state.wallet_db[st.session_state.wallet_db['房号'] == room].index
     
-    # 清洗并转换当前余额
+    # 强转数值
     current_val = st.session_state.wallet_db.at[w_idx[0], '账户余额']
-    try:
-        current = float(str(current_val).replace(',', ''))
-    except:
-        current = 0.0
+    current = clean_currency(current_val)
 
     st.session_state.wallet_db.at[w_idx[0], '账户余额'] = current + amount
     st.session_state.wallet_db.at[w_idx[0], '最后更新时间'] = str(datetime.datetime.now())
@@ -156,17 +175,6 @@ def update_wallet(room, owner, amount, trans_type, ref_id, remark, user):
     st.session_state.transaction_log = safe_concat([st.session_state.transaction_log, new_trans])
     return True
 
-# [新增] 专门处理 CSV 字符串转数字的工具函数
-def clean_currency(val):
-    if pd.isna(val) or str(val).strip() == "":
-        return 0.0
-    # 移除千位分隔符逗号
-    clean_str = str(val).replace(',', '').strip()
-    try:
-        return float(clean_str)
-    except:
-        return 0.0
-
 # ==============================================================================
 # 1. 登录与主框架
 # ==============================================================================
@@ -175,7 +183,7 @@ def check_login():
     if not st.session_state.logged_in:
         c1, c2, c3 = st.columns([1,2,1])
         with c2:
-            st.markdown("## 🔐 世纪名城 ERP V19.0")
+            st.markdown("## 🔐 世纪名城 ERP V20.0")
             st.info("账号: admin / cfo / clerk / audit (密码: 123)")
             user = st.text_input("账号")
             pwd = st.text_input("密码", type="password")
@@ -219,87 +227,106 @@ def main():
         if HAS_GITHUB:
             if st.button("💾 云端保存"):
                 if save_to_gist(): st.success("已存")
-            if st.button("📥 云端恢复"):
-                if load_from_gist(): st.success("已读"); time.sleep(1); st.rerun()
+            if st.button("📥 云端恢复 (校准版)"):
+                if load_from_gist(): st.success("已读并校准"); time.sleep(1); st.rerun()
         
         if st.button("退出登录"):
             st.session_state.logged_in = False
             st.rerun()
 
     # ==========================================================================
-    # 模块 1: 运营驾驶舱 (Fix: 数据一致性问题)
+    # 模块 1: 运营驾驶舱 (核心修复区域)
     # ==========================================================================
     if menu == "📊 运营驾驶舱":
         st.title("📊 运营状况概览")
         
+        # 1. 获取原始数据拷贝
         df_prop = st.session_state.ledger.copy()
         df_park = st.session_state.parking_ledger.copy()
-        df_wallet = st.session_state.wallet_db.copy() # 获取钱包数据
+        df_wallet = st.session_state.wallet_db.copy()
         
-        # 1. 字段标准化
+        # 2. 对齐列名 (防止 KeyError)
         if not df_park.empty:
             df_park = df_park.rename(columns={'车位编号': '房号', '业主/车主': '业主'})
+            # 确保车位表也有必要的列
             for col in ['应收', '实收', '减免金额']:
                 if col not in df_park.columns: df_park[col] = 0.0
         
-        # 2. 合并台账
+        # 3. 合并数据
         df_all = safe_concat([df_prop, df_park])
         
         if df_all.empty and df_wallet.empty:
-            st.info("暂无数据。请尝试【云端恢复】或【数据导入】。")
+            st.info("⚠️ 系统暂无数据。请点击左下角【云端恢复】尝试加载历史数据，或进行【数据导入】。")
         else:
-            # 3. [核心修复] 使用 clean_currency 清洗数据
-            # 解决字符串 "1,000.00" 无法被识别的问题
-            for col in ['应收', '实收', '减免金额']:
+            # -----------------------------------------------------------
+            # [核心修复步骤 1]: 强力数值清洗
+            # -----------------------------------------------------------
+            # 确保所有金额列都是纯数字 (Float)，处理 "1,000.00" 或 "nan"
+            numeric_cols = ['应收', '实收', '减免金额']
+            for col in numeric_cols:
                 if col in df_all.columns:
                     df_all[col] = df_all[col].apply(clean_currency)
                 else:
                     df_all[col] = 0.0
+
+            # -----------------------------------------------------------
+            # [核心修复步骤 2]: 统一 Key 的类型
+            # -----------------------------------------------------------
+            # 确保 '房号' 和 '业主' 都是字符串，避免 '101' (int) 和 '101' (str) 分组失败
+            df_all['房号'] = df_all['房号'].apply(clean_string_key)
+            df_all['业主'] = df_all['业主'].apply(clean_string_key)
             
-            # 计算单据欠费
+            # 计算每笔账单的实时欠费
             df_all['余额'] = df_all['应收'] - df_all['实收'] - df_all['减免金额']
             
-            # 4. 聚合计算
-            df_all['房号'] = df_all['房号'].fillna('未知')
-            df_all['业主'] = df_all['业主'].fillna('未知')
+            # -----------------------------------------------------------
+            # [核心修复步骤 3]: 聚合计算
+            # -----------------------------------------------------------
             agg = df_all.groupby(['房号', '业主'])['余额'].sum().reset_index()
             
-            # KPI计算
+            # 计算KPI
             total_income = df_all['实收'].sum()
+            # 只有余额大于 0.1 元的才算欠费（排除浮点数误差）
             total_arrears = agg[agg['余额'] > 0.1]['余额'].sum()
             
-            # 5. [核心修复] 沉淀资金改为读取 Wallet 表
-            # 之前的逻辑只计算了负数账单，这会遗漏未核销的充值款
+            # -----------------------------------------------------------
+            # [核心修复步骤 4]: 资金池计算逻辑修正
+            # -----------------------------------------------------------
+            # 资金池沉淀应该看 Wallet 表，而不是看账单表
             if not df_wallet.empty and '账户余额' in df_wallet.columns:
                 df_wallet['账户余额'] = df_wallet['账户余额'].apply(clean_currency)
                 total_prepay = df_wallet['账户余额'].sum()
             else:
                 total_prepay = 0.0
             
-            # 展示KPI
+            # 4. 展示数据 (此时应该是正确的)
             c1, c2, c3 = st.columns(3)
-            c1.metric("累计总实收", f"¥{total_income:,.0f}")
-            c2.metric("当前总欠费", f"¥{total_arrears:,.0f}", delta="需重点催收", delta_color="inverse")
-            c3.metric("资金池沉淀(预收)", f"¥{total_prepay:,.0f}", delta="可用资金")
+            c1.metric("累计总实收", f"¥{total_income:,.2f}")
+            c2.metric("当前总欠费", f"¥{total_arrears:,.2f}", delta="需重点催收", delta_color="inverse")
+            c3.metric("资金池沉淀(预收)", f"¥{total_prepay:,.2f}", delta="可用资金")
             
             st.divider()
-            t1, t2 = st.tabs(["欠费排行", "资金池排行"])
+            t1, t2 = st.tabs(["🚨 欠费Top 10", "💰 预存Top 10"])
             
             with t1:
-                st.subheader("🚨 欠费Top 10")
+                # 过滤出真正欠费的（大于1元），并排序
                 top_owe = agg[agg['余额'] > 1.0].sort_values('余额', ascending=False).head(10)
-                st.dataframe(top_owe.style.format({'余额': '{:.2f}'}), use_container_width=True)
+                if not top_owe.empty:
+                    st.dataframe(top_owe.style.format({'余额': '{:.2f}'}), use_container_width=True)
+                else:
+                    st.success("🎉 目前没有大额欠费记录！")
             
             with t2:
-                st.subheader("💰 预存大户Top 10")
                 if not df_wallet.empty:
+                    # 同样清洗房号 key
+                    df_wallet['房号'] = df_wallet['房号'].apply(clean_string_key)
                     top_wal = df_wallet.sort_values('账户余额', ascending=False).head(10)
                     st.dataframe(top_wal[['房号','业主','账户余额']].style.format({'账户余额': '{:.2f}'}), use_container_width=True)
                 else:
                     st.info("暂无钱包数据")
 
     # ==========================================================================
-    # 模块 2: 财务决策中心 (保持 V18 增强版)
+    # 模块 2: 财务决策中心 (同样应用清洗逻辑)
     # ==========================================================================
     elif menu == "💰 财务决策中心":
         st.title("💰 财务决策支持中心 (BI)")
@@ -308,7 +335,7 @@ def main():
         if df.empty:
             st.info("暂无财务数据，无法生成报表。")
         else:
-            # 数据清洗
+            # 应用同样的清洗逻辑
             for col in ['应收', '实收', '减免金额', '欠费']:
                 df[col] = df[col].apply(clean_currency)
             
@@ -358,7 +385,7 @@ def main():
             sel_room = c_r.selectbox("房号", st.session_state.rooms_db['房号'].unique(), key="w_r")
             
             df = st.session_state.ledger.copy()
-            # 同样需要清洗欠费字段用于筛选
+            # 清洗欠费字段
             df['欠费'] = df['欠费'].apply(clean_currency)
             
             unpaid = df[(df['房号']==sel_room) & (df['欠费']>0.1)]
@@ -411,7 +438,6 @@ def main():
                         
                         idx_l = st.session_state.ledger[st.session_state.ledger['流水号']==bill_id].index
                         if not idx_l.empty:
-                            # 必须确保 ledger 里的数值也是 float
                             curr_waiver = clean_currency(st.session_state.ledger.at[idx_l[0], '减免金额'])
                             curr_owe = clean_currency(st.session_state.ledger.at[idx_l[0], '欠费'])
                             
@@ -458,7 +484,6 @@ def main():
                         for k in sels:
                             bid = opts[k]
                             idx = st.session_state.ledger[st.session_state.ledger['流水号']==bid].index[0]
-                            # 更新 Ledger
                             curr_ss = clean_currency(st.session_state.ledger.at[idx, '实收'])
                             curr_owe = clean_currency(st.session_state.ledger.at[idx, '欠费'])
                             st.session_state.ledger.at[idx, '实收'] = curr_ss + curr_owe

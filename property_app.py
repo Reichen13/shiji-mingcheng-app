@@ -505,12 +505,22 @@ def main():
                         target = unpaid[unpaid['流水号']==bid].iloc[0]
                         if amt > target['欠费']: st.error("金额过大")
                         else:
+                          owner_name = target.get('业主', '未知') 
+                            fee_type = target.get('费用类型', '未知科目')
+                            orig_amount = target.get('应收', 0.0)
+
                             req = pd.DataFrame([{
-                                '申请单号': str(uuid.uuid4())[:6], '房号': sel_room, '业主': target['业主'],
-                                '费用类型': target['费用类型'], '原应收': target['应收'],
-                                '申请减免金额': amt, '申请原因': reason, 
-                                '申请人': user, '申请时间': str(datetime.date.today()),
-                                '审批状态': '待审批', '关联账单号': bid
+                                '申请单号': str(uuid.uuid4())[:6], 
+                                '房号': sel_room, 
+                                '业主': owner_name, # 修改点：使用安全获取的变量
+                                '费用类型': fee_type, # 修改点
+                                '原应收': orig_amount, # 修改点
+                                '申请减免金额': amt, 
+                                '申请原因': reason, 
+                                '申请人': user, 
+                                '申请时间': str(datetime.date.today()),
+                                '审批状态': '待审批', 
+                                '关联账单号': bid
                             }])
                             st.session_state.waiver_requests = safe_concat([st.session_state.waiver_requests, req])
                             st.success("已提交")
@@ -602,3 +612,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

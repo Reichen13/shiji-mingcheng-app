@@ -21,7 +21,7 @@ except ImportError:
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="世纪名城 ERP | V26.0 历史导入增强版", 
+    page_title="世纪名城 ERP | V26.2 全功能无损版", 
     layout="wide", 
     page_icon="🏙️",
     initial_sidebar_state="expanded"
@@ -50,7 +50,7 @@ def init_session():
     init_df('wallet_db', ['房号', '业主', '账户余额', '最后更新时间'])
     init_df('transaction_log', ['流水号', '时间', '房号', '交易类型', '发生金额', '账户余额快照', '关联单号', '备注', '操作人'])
 
-    # 基础主数据表
+    # 基础主数据表 (Master Data)
     if 'master_units' not in st.session_state:
         st.session_state.master_units = pd.DataFrame(columns=["房号", "资源类型", "计费面积", "状态", "所属项目", "交付日期"])
         if st.session_state.master_units.empty:
@@ -121,6 +121,18 @@ def update_wallet(room, owner, amount, trans_type, ref_id, remark, user):
     st.session_state.transaction_log = safe_concat([st.session_state.transaction_log, new_trans])
     return True
 
+def parse_date(date_val):
+    if pd.isna(date_val) or str(date_val).strip() == "" or str(date_val).strip() == "nan": return ""
+    s = str(date_val).replace('\n', ' ').split(' ')[0]
+    try: return parser.parse(s, fuzzy=True).strftime("%Y-%m-%d")
+    except: return ""
+
+def clean_str(val):
+    if pd.isna(val): return ""
+    s = str(val).replace('\n', ' ').strip()
+    if s.lower() == 'nan': return ""
+    return s
+
 # --- Gist 同步 ---
 def get_gist_client():
     try:
@@ -177,7 +189,7 @@ def load_from_gist():
         return True
     except: return False
 
-# --- 导入解析逻辑 ---
+# --- 导入解析逻辑 (全功能保留) ---
 def smart_read_excel(file):
     try:
         if file.name.endswith('.csv'): return pd.read_csv(file, dtype=str)
@@ -185,53 +197,129 @@ def smart_read_excel(file):
     except Exception as e:
         return None
 
-# ==============================================================================
-# V26.0 核心逻辑: 历史数据宽表解析器
-# ==============================================================================
+# [V15旧版解析逻辑 - 找回]
+def ingest_payment_block(room, owner, prop_std, elev_std, pay_date, receipt, period, total_paid):
+    recs = []
+    alloc_prop = min(total_paid, prop_std) if prop_std > 0 else total_paid
+    if elev_std == 0: alloc_prop = total_paid
+    remain_after_prop = total_paid - alloc_prop
+    bal_p = prop_std - alloc_prop
+    status_p = "已缴"
+    if bal_p > 0.1: status_p = "部分欠费"
+    if alloc_prop == 0 and prop_std > 0: status_p = "未缴"
+    if bal_p < -0.1: status_p = "溢缴/预收"
+    recs.append({"流水号": str(uuid.uuid4())[:8], "房号": room, "业主": owner, "费用类型": "物业服务费", "应收": prop_std, "实收": alloc_prop, "减免金额": 0.0, "欠费": max(0, bal_p), "收费区间": period, "状态": status_p, "收费日期": pay_date, "收据编号": receipt, "备注": "导入", "操作人": st.session_state.username, "来源文件": "2025台账"})
+    if elev_std > 0 or remain_after_prop > 0:
+        alloc_elev = remain_after_prop
+        bal_e = elev_std - alloc_elev
+        status_e = "已缴"
+        if bal_e > 0.1: status_e = "部分欠费"
+        if alloc_elev == 0 and elev_std > 0: status_e = "未缴"
+        if bal_e < -0.1: status_e = "溢缴/预收"
+        recs.append({"流水号": str(uuid.uuid4())[:8], "房号": room, "业主": owner, "费用类型": "电梯运行费", "应收": elev_std, "实收": alloc_elev, "减免金额": 0.0, "欠费": max(0, bal_e), "收费区间": period, "状态": status_e, "收费日期": pay_date, "收据编号": receipt, "备注": "导入", "操作人": st.session_state.username, "来源文件": "2025台账"})
+    return recs
+
+def process_2025_import(file_prop):
+    imported_recs = []
+    df = smart_read_excel(file_prop)
+    if df is not None:
+        for idx, row in df.iterrows():
+            try:
+                if len(row) < 22: continue 
+                room = clean_str(row.iloc[1])
+                owner = clean_str(row.iloc[2])
+                if not room or room == 'nan': continue
+                def get_f(val):
+                    try: return float(val)
+                    except: return 0.0
+                prop_std = get_f(row.iloc[8])
+                elev_std = get_f(row.iloc[9])
+                pay_date = parse_date(row.iloc[16]) 
+                receipt = clean_str(row.iloc[17])   
+                period_val = clean_str(row.iloc[19]) 
+                period = period_val if period_val else "2025.8.6-2026.8.5"
+                amt_u = get_f(row.iloc[20])
+                val_v = row.iloc[21]
+                amt_v = get_f(val_v) if pd.notnull(val_v) and str(val_v).replace('.','').isdigit() else 0.0
+                total_paid_1 = amt_u + amt_v
+                if total_paid_1 > 0 or prop_std > 0:
+                    imported_recs.extend(ingest_payment_block(room, owner, prop_std, elev_std, pay_date, receipt, period, total_paid_1))
+            except Exception as e: continue
+    return imported_recs
+
+def process_parking_import(file_park):
+    imported_park = []
+    if file_park:
+        df = smart_read_excel(file_park)
+        if df is not None:
+            for idx, row in df.iterrows():
+                try:
+                    room = clean_str(row.iloc[1])
+                    if not room: continue
+                    owner = clean_str(row.iloc[2])
+                    car_no = clean_str(row.iloc[4])
+                    pay_date = parse_date(row.iloc[15])
+                    period = clean_str(row.iloc[17])
+                    try: amount = float(row.iloc[18])
+                    except: amount = 0.0
+                    receipt = clean_str(row.iloc[12])
+                    if not receipt: receipt = clean_str(row.iloc[16])
+                    if amount > 0:
+                        imported_park.append({"流水号": str(uuid.uuid4())[:8], "车位编号": car_no, "车位类型": "导入车位", "业主/车主": f"{owner}({room})", "联系电话": "", "收费起始": period.split('-')[0] if '-' in period else "", "收费截止": period.split('-')[1] if '-' in period else "", "收费区间": period, "单价": 0.0, "应收": amount, "实收": amount, "减免金额": 0.0, "欠费": 0.0, "收据编号": receipt, "收费日期": pay_date, "备注": "批量导入", "操作人": st.session_state.username})
+                except: continue
+    return imported_park
+
+def process_2024_arrears(file_old):
+    imported_recs = []
+    df = smart_read_excel(file_old)
+    if df is not None:
+        cols = df.columns.astype(str)
+        c_room = next((c for c in cols if '房号' in c or '单元' in c), df.columns[0])
+        c_owner = next((c for c in cols if '业主' in c or '姓名' in c), df.columns[1])
+        c_amt = next((c for c in cols if '合计' in c or '欠费' in c or '金额' in c), df.columns[-1])
+        for idx, row in df.iterrows():
+            try:
+                r = clean_str(row[c_room])
+                if not r or '合计' in r: continue
+                o = clean_str(row[c_owner])
+                try: m = float(row[c_amt])
+                except: m = 0.0
+                if m > 0:
+                    imported_recs.append({"流水号": str(uuid.uuid4())[:8], "房号": r, "业主": o, "费用类型": "物业服务费", "应收": m, "实收": 0.0, "减免金额": 0.0, "欠费": m, "收费区间": "2024欠费", "状态": "历史欠费", "收费日期": "", "收据编号": "", "备注": "2024导入", "操作人": st.session_state.username, "来源文件": "2024欠费表"})
+            except: continue
+    return imported_recs
+
+# [V26新版宽表解析逻辑]
 def process_historical_batch(df_raw, user):
-    """
-    能够解析一行多列的宽表，并拆分为 ledger(欠费) 和 wallet(预缴)
-    """
     imported_bills = []
     wallet_updates = []
     new_units = []
-    
     success_count = 0
-    
-    # 强制去除列名空格
     df_raw.columns = df_raw.columns.str.strip()
     
     for idx, row in df_raw.iterrows():
         try:
-            # 1. 基础信息提取
             room = clean_string_key(row.get('房号'))
             if not room or room == 'nan': continue
-            
             owner = str(row.get('客户名', '未知')).strip()
             area = clean_currency(row.get('收费面积', 0))
             
-            # 自动补全档案 (如果不存在)
             if room not in st.session_state.master_units['房号'].values:
                 new_units.append({
                     "房号": room, "资源类型": "导入生成", "计费面积": area, 
                     "状态": "导入", "所属项目": "历史导入", "交付日期": "2023-01-01"
                 })
 
-            # 2. 循环处理 Fee Item 1 和 Fee Item 2
-            # 逻辑：遍历两组字段后缀
             for suffix in ['1', '2']:
-                # 获取动态列名
-                col_name = f'收费项目{suffix}_名称' # 例如：收费项目1_名称
+                col_name = f'收费项目{suffix}_名称'
                 col_owe = f'收费项目{suffix}_欠费'
                 col_owe_p = f'收费项目{suffix}_欠费期间'
                 col_pre = f'收费项目{suffix}_预缴'
                 col_pre_p = f'收费项目{suffix}_预缴期间'
                 
-                # 检查列是否存在
                 fee_name = str(row.get(col_name, '')).strip()
-                if not fee_name or fee_name == 'nan': continue # 如果没填项目名，跳过
+                if not fee_name or fee_name == 'nan': continue
                 
-                # --- 处理欠费 (Ledger) ---
                 owe_amt = clean_currency(row.get(col_owe, 0))
                 if owe_amt > 0:
                     period = str(row.get(col_owe_p, '历史欠费'))
@@ -239,26 +327,20 @@ def process_historical_batch(df_raw, user):
                         "流水号": f"HIS-{uuid.uuid4().hex[:6]}",
                         "房号": room, "业主": owner, "费用类型": fee_name,
                         "应收": owe_amt, "实收": 0.0, "减免金额": 0.0, "欠费": owe_amt,
-                        "收费区间": period, "归属年月": period[:7], # 简单截取
+                        "收费区间": period, "归属年月": period[:7],
                         "状态": "历史欠费", "收费日期": "", "操作人": user,
                         "来源文件": "历史批量导入", "备注": "期初欠费"
                     })
                 
-                # --- 处理预缴 (Wallet) ---
                 pre_amt = clean_currency(row.get(col_pre, 0))
                 if pre_amt > 0:
                     period_pre = str(row.get(col_pre_p, ''))
-                    # 预缴直接存入钱包，并备注来源
                     wallet_updates.append({
                         "房号": room, "业主": owner, "金额": pre_amt,
                         "备注": f"历史预存-{fee_name}({period_pre})"
                     })
-            
             success_count += 1
-            
-        except Exception as e:
-            continue
-            
+        except Exception as e: continue
     return imported_bills, wallet_updates, new_units, success_count
 
 # ==============================================================================
@@ -269,7 +351,7 @@ def check_login():
     if not st.session_state.logged_in:
         c1, c2, c3 = st.columns([1,2,1])
         with c2:
-            st.markdown("## 🔐 世纪名城 ERP V26.0")
+            st.markdown("## 🔐 世纪名城 ERP V26.2")
             st.info("账号: admin / cfo / clerk / audit (密码: 123)")
             user = st.text_input("账号")
             pwd = st.text_input("密码", type="password")
@@ -320,59 +402,61 @@ def main():
             st.rerun()
 
     # ==========================================================================
-    # V26.0 核心升级: 历史数据导入 (宽表模式)
+    # 数据导入 (全功能版)
     # ==========================================================================
     if menu == "📥 数据导入":
         st.title("📥 数据导入中心")
-        
-        t1, t2 = st.tabs(["🏗️ 历史数据批量导入 (期初)", "📜 银行流水对账 (预留)"])
+        t1, t2, t3 = st.tabs(["🏗️ 历史宽表导入(推荐)", "📂 旧版台账导入(V15)", "🚗 旧版车位/欠费(V15)"])
         
         with t1:
-            st.markdown("### 📊 历史欠费与预存一键导入")
+            st.markdown("### 📊 V26 历史欠费与预存一键导入")
             st.info("""
-            **功能说明：** 用于系统上线初始化。支持一行数据同时导入房产信息、多种费用的欠费以及预存金额。
-            
-            **Excel 模板列名要求 (必须包含):**
-            * `房号`, `客户名`, `收费面积`
-            * `收费项目1_名称`, `收费项目1_欠费`, `收费项目1_欠费期间`, `收费项目1_预缴`, `收费项目1_预缴期间`
-            * `收费项目2_名称`, `收费项目2_欠费`, `收费项目2_欠费期间`, `收费项目2_预缴`, `收费项目2_预缴期间`
-            *(支持自定义项目名称，如 '物业费', '水费' 等)*
+            **功能说明：** 推荐使用此模块进行上线初始化。
+            **Excel 模板列名:** `房号`, `客户名`, `收费面积`, `收费项目1_名称`, `收费项目1_欠费`, `收费项目1_预缴` 等
             """)
-            
-            up_his = st.file_uploader("上传历史数据 Excel", key="his_up")
-            
+            up_his = st.file_uploader("上传 V26 宽表", key="his_up")
             if up_his and st.button("🚀 开始清洗并导入"):
                 df_raw = smart_read_excel(up_his)
                 if df_raw is not None:
-                    # 调用 V26 解析引擎
                     bills, wallets, units, count = process_historical_batch(df_raw, user)
-                    
                     if count > 0:
-                        # 1. 存入欠费 (Ledger)
-                        if bills:
-                            st.session_state.ledger = safe_concat([st.session_state.ledger, pd.DataFrame(bills)])
-                        
-                        # 2. 存入钱包 (Wallet)
-                        for w in wallets:
-                            update_wallet(w['房号'], w['业主'], w['金额'], "期初导入", "系统", w['备注'], user)
-                            
-                        # 3. 补全档案 (Master)
+                        if bills: st.session_state.ledger = safe_concat([st.session_state.ledger, pd.DataFrame(bills)])
+                        for w in wallets: update_wallet(w['房号'], w['业主'], w['金额'], "期初导入", "系统", w['备注'], user)
                         if units:
                             st.session_state.master_units = safe_concat([st.session_state.master_units, pd.DataFrame(units)]).drop_duplicates(subset='房号', keep='last')
-                            # 兼容层同步
                             nr = pd.DataFrame(units)[['房号', '计费面积']].rename(columns={'计费面积':'收费面积'})
                             st.session_state.rooms_db = safe_concat([st.session_state.rooms_db, nr]).drop_duplicates(subset='房号', keep='last')
+                        st.success(f"✅ 解析 {count} 行，导入欠费 {len(bills)} 笔，预存 {len(wallets)} 笔。")
+                        log_action(user, "历史导入", f"导入文件 {up_his.name}")
+                    else: st.warning("❌ 未解析到有效数据")
 
-                        st.success(f"✅ 处理完成！解析了 {count} 行数据。")
-                        st.write(f"- 生成欠费单据: {len(bills)} 笔")
-                        st.write(f"- 预存充值记录: {len(wallets)} 笔")
-                        st.write(f"- 新增房产档案: {len(units)} 个")
-                        log_action(user, "历史导入", f"导入文件 {up_his.name}, 解析 {count} 行")
-                    else:
-                        st.warning("❌ 未解析到有效数据，请检查列名是否完全匹配（不要有空格）。")
+        with t2:
+            st.markdown("### 📜 V15 旧版台账导入")
+            up_old_prop = st.file_uploader("上传 2025物业台账", key="old_p")
+            if up_old_prop and st.button("导入台账"):
+                r1 = process_2025_import(up_old_prop)
+                if r1:
+                    st.session_state.ledger = safe_concat([st.session_state.ledger, pd.DataFrame(r1)])
+                    st.success(f"已导入 {len(r1)} 条台账")
+
+        with t3:
+            st.markdown("### 🅿️ V15 旧版车位/欠费")
+            c1, c2 = st.columns(2)
+            f1 = c1.file_uploader("车位表", key="u2")
+            f2 = c2.file_uploader("欠费表", key="u3")
+            if f1 and c1.button("导入车位"):
+                p = process_parking_import(f1)
+                if p:
+                    st.session_state.parking_ledger = safe_concat([st.session_state.parking_ledger, pd.DataFrame(p)])
+                    st.success(f"导入车位 {len(p)} 条")
+            if f2 and c2.button("导入欠费"):
+                r3 = process_2024_arrears(f2)
+                if r3:
+                    st.session_state.ledger = safe_concat([st.session_state.ledger, pd.DataFrame(r3)])
+                    st.success(f"导入欠费 {len(r3)} 条")
 
     # ==========================================================================
-    # 其他模块 (保持 V25 逻辑)
+    # 基础配置 (Master Data)
     # ==========================================================================
     elif menu == "⚙️ 基础配置 (Master)":
         st.title("⚙️ 基础数据维护")
@@ -396,6 +480,9 @@ def main():
                 ed_f = st.data_editor(df_f, num_rows="dynamic", use_container_width=True, key="ed_f")
                 if st.button("保存标准"): st.session_state.master_fees = ed_f; st.success("OK")
 
+    # ==========================================================================
+    # 运营驾驶舱
+    # ==========================================================================
     elif menu == "📊 运营驾驶舱":
         st.title("📊 运营状况概览")
         df_prop = st.session_state.ledger.copy()
@@ -505,16 +592,17 @@ def main():
                         target = unpaid[unpaid['流水号']==bid].iloc[0]
                         if amt > target['欠费']: st.error("金额过大")
                         else:
-                          owner_name = target.get('业主', '未知') 
-                            fee_type = target.get('费用类型', '未知科目')
-                            orig_amount = target.get('应收', 0.0)
+                            # 修复缩进错误和KeyError
+                            owner_name = target.get('业主', '未知')
+                            fee_type = target.get('费用类型', '未知科目') 
+                            orig_amt = target.get('应收', 0.0)
 
                             req = pd.DataFrame([{
                                 '申请单号': str(uuid.uuid4())[:6], 
                                 '房号': sel_room, 
-                                '业主': owner_name, # 修改点：使用安全获取的变量
-                                '费用类型': fee_type, # 修改点
-                                '原应收': orig_amount, # 修改点
+                                '业主': owner_name, 
+                                '费用类型': fee_type, 
+                                '原应收': orig_amt,
                                 '申请减免金额': amt, 
                                 '申请原因': reason, 
                                 '申请人': user, 
@@ -549,7 +637,6 @@ def main():
 
     elif menu == "💸 收银与充值":
         st.title("💸 收银台")
-        # 联动 master_units
         r_list = st.session_state.master_units['房号'].unique() if not st.session_state.master_units.empty else []
         r = st.selectbox("房号", r_list)
         bal = 0.0
@@ -612,4 +699,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

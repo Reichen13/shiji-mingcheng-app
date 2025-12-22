@@ -583,35 +583,60 @@ def main():
     # ==========================================================================
     # 运营驾驶舱
     # ==========================================================================
-    elif menu == "📊 运营驾驶舱":
+   elif menu == "📊 运营驾驶舱":
         st.title("📊 运营状况概览")
+        
+        # --- [修复点1] 防御性读取：确保 Ledger 有业主列 ---
         df_prop = st.session_state.ledger.copy()
+        if '业主' not in df_prop.columns:
+            df_prop['业主'] = '未知' # 自动补全缺失列
+            
         df_park = st.session_state.parking_ledger.copy()
         df_wallet = st.session_state.wallet_db.copy()
         
+        # --- [修复点2] 车位表处理增强 ---
         if not df_park.empty:
+            # 尝试重命名，如果原列不存在也不报错
             df_park = df_park.rename(columns={'车位编号': '房号', '业主/车主': '业主'})
+            
+            # 再次检查重命名后是否有“业主”，没有则补全
+            if '业主' not in df_park.columns:
+                df_park['业主'] = '车位用户'
+                
             for col in ['应收', '实收', '减免金额']:
-                if col not in df_park.columns: df_park[col] = 0.0
+                if col not in df_park.columns: df_park[col] = Decimal(0)
         
         df_all = safe_concat([df_prop, df_park])
         
         if df_all.empty and df_wallet.empty:
             st.info("👋 暂无数据。")
         else:
+            # --- [修复点3] 确保数值列存在，防止计算报错 ---
             for col in ['应收', '实收', '减免金额']:
-                if col in df_all.columns: df_all[col] = df_all[col].apply(to_decimal)
-                else: df_all[col] = Decimal(0)
+                if col in df_all.columns: 
+                    df_all[col] = df_all[col].apply(to_decimal)
+                else: 
+                    df_all[col] = Decimal(0)
+
+            # --- [修复点4] 确保字符列存在，防止 KeyError ---
+            if '房号' not in df_all.columns: df_all['房号'] = '未知'
+            if '业主' not in df_all.columns: df_all['业主'] = '未知'
 
             df_all['房号'] = df_all['房号'].apply(clean_string_key)
             df_all['业主'] = df_all['业主'].apply(clean_string_key)
+            
+            # 计算余额
             df_all['余额'] = df_all['应收'] - df_all['实收'] - df_all['减免金额']
             
-            # GroupBy after decimal conversion (Pandas handles decimal sum)
+            # GroupBy
             agg = df_all.groupby(['房号', '业主'])['余额'].sum().reset_index()
             
             total_income = df_all['实收'].sum()
-            total_arrears = agg[agg['余额'] > Decimal('0.1')]['余额'].sum()
+            # 再次防御：确保 agg 中有 '余额'
+            if '余额' in agg.columns:
+                total_arrears = agg[agg['余额'] > Decimal('0.1')]['余额'].sum()
+            else:
+                total_arrears = Decimal(0)
             
             total_prepay = Decimal(0)
             if not df_wallet.empty and '账户余额' in df_wallet.columns:
@@ -626,16 +651,18 @@ def main():
             st.divider()
             t1, t2 = st.tabs(["🚨 欠费排名", "💰 预存排名"])
             with t1:
-                top_owe = agg[agg['余额'] > Decimal(1)].sort_values('余额', ascending=False).head(10)
-                if not top_owe.empty: st.dataframe(top_owe.style.format({'余额': '{:.2f}'}), use_container_width=True)
-                else: st.success("无大额欠费")
+                if not agg.empty and '余额' in agg.columns:
+                    top_owe = agg[agg['余额'] > Decimal(1)].sort_values('余额', ascending=False).head(10)
+                    if not top_owe.empty: st.dataframe(top_owe.style.format({'余额': '{:.2f}'}), use_container_width=True)
+                    else: st.success("无大额欠费")
+                else: st.info("无数据")
             with t2:
                 if not df_wallet.empty:
                     df_wallet['房号'] = df_wallet['房号'].apply(clean_string_key)
                     top_wal = df_wallet.sort_values('账户余额', ascending=False).head(10)
                     st.dataframe(top_wal[['房号','业主','账户余额']].style.format({'账户余额': '{:.2f}'}), use_container_width=True)
                 else: st.info("无钱包数据")
-
+                    
     elif menu == "💰 财务决策中心":
         st.title("💰 财务决策支持中心 (BI)")
         
@@ -889,3 +916,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
